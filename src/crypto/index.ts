@@ -4,3 +4,4 @@ export * from "./grumpkin.js";
 export * from "./poseidon2.js";
 export * from "./address.js";
 export * from "./keys.js";
+export * from "./sk-derivation.js";

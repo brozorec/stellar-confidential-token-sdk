@@ -1,0 +1,41 @@
+{
+  "primitive": "sk_derivation_chain",
+  "design_doc_refs": [
+    "SDK.md Section 5.1",
+    "SDK.md Section 6.3"
+  ],
+  "description": "The full account-secret derivation, from a SEP-0053 signer root through addr_f and acct_f to sk, vk, Y and PVK. Section 6.3 requires a fixture for this chain including the signature preimage and the resulting signature; none is published, so this one is offered. The rejection counter j is included because it is an OUTPUT, not an input: a client that samples candidates differently lands on a different j and therefore a different sk from the same root.",
+  "vectors": [
+    {
+      "inputs": {
+        "ed25519_seed": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "contract": "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        "account": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+      },
+      "intermediate": {
+        "sk_domain": "openzeppelin/confidential-token/v1/sk",
+        "sep53_prefix": "Stellar Signed Message:\n",
+        "signed_message_utf8": "openzeppelin/confidential-token/v1/sk\nCA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ\nGDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
+        "signed_message_hex": "0x6f70656e7a657070656c696e2f636f6e666964656e7469616c2d746f6b656e2f76312f736b0a43413751594e4637534f575133474c523242474d5a454858415649525a41344b56574c544a4a4643374d4758554137345037554a5653475a0a47444945564d52534f5156334a4b5a32434e554c325251563454544e4149534b57344e41433235505155514b474d574a4f3644544f414537",
+        "sep53_payload_sha256": "0xa9bf754d02faa383885e1e1992d532eb003963cc05e65e6bab8519e09293e05d",
+        "root_signature": "0xffe8aad4e80590c607393e5edf64353f2121d38a571236fd276ade712be94ef652e29074f327a1523ade589f30be1fa979b2d52dc9bdbaa69607d07c3d1b2401",
+        "root_signature_base64": "/+iq1OgFkMYHOT5e32Q1PyEh04pXEjb9J2recSvpTvZS4pB08yehUjreWJ8wvh+pebLVLcm9uqaWB9B8PRskAQ==",
+        "addr_f": "0x2982b1373023a907937e2a08d12801dd31e58967391f051c4b3d47a37c387afa",
+        "acct_f": "0x0d65ceefc88131851c4a6200f566eebec91447e0a492a1892b4bb0eb58c7332a",
+        "rejection_counter_j": 0
+      },
+      "output": {
+        "sk": "0x1d6c9fd15b6eb55a0d74cd03c7e8c591941cf3b819a734729596a5ad06cb947e",
+        "vk": "0x10a7dc532f3f0f60babd1d91e55bb7a2471608b9234ecb41407345c322b1d566",
+        "Y": {
+          "x": "0x0a5a608c7dce17d8cf644793e8bec28574a2e154fe7c9957527ea47254b88aad",
+          "y": "0x0528fab63c8fc3e96199df988357b8e798319b0f91b05731365534df9e5e7ec3"
+        },
+        "PVK": {
+          "x": "0x0abb6030c6cee95d9f6426fcd85bc6165e5d8b7b4ab175a8b362e3bdab81b824",
+          "y": "0x1f03bed65ace57ce1be7c74765821283f46d3f0e99c95f591f235fc1e3c19e91"
+        }
+      }
+    }
+  ]
+}

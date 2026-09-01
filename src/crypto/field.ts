@@ -95,26 +95,41 @@ export function hexToBytes(h: string): Uint8Array {
 }
 
 /**
- * Cryptographically-random nonzero scalar, uniform on `[1, r)`.
+ * One deterministic step of the protocol's rejection-sampling procedure
+ * (SDK.md §4.7 / the `RS` of the §5.1 `sk` derivation): clear the top **2**
+ * bits of a 32-byte big-endian candidate and accept iff the 254-bit result is
+ * in `[1, r)` (`[0, r)` with `nonzero: false`). Returns `null` on rejection —
+ * the CALLER redraws (§4.7) or increments its counter and re-derives (§5.1).
  *
- * The rejection procedure is fixed by the protocol specification: draw 32
- * bytes, clear the top **2** bits, redraw if the 254-bit candidate is `>= r`
- * (or zero where nonzero is required). Since `r` is just over ¾ of `2^254`,
- * the loop redraws ~25% of the time and the output is uniform on the full
- * range.
- *
- * Masking more than 2 bits would still be `< r` — but it would silently
- * shrink the range instead of rejecting, and the same procedure is the `RS`
- * step of the `sk` derivation, where a client that masks a different
- * number of bits derives a DIFFERENT `sk` from the same root. The bit count is
- * a cross-client contract, not a local bias-reduction choice.
+ * Masking more than 2 bits would still land `< r` — but it would silently
+ * shrink the range instead of rejecting, and §5.1 feeds this procedure HKDF
+ * output rather than CSPRNG bytes, so a client that masks a different number
+ * of bits derives a DIFFERENT `sk` from the same root. The bit count is a
+ * cross-client contract, not a local bias-reduction choice.
+ */
+export function rejectionSample(bytes32: Uint8Array, nonzero = true): bigint | null {
+  if (bytes32.length !== 32) {
+    throw new Error(`rejectionSample expects 32 bytes, got ${bytes32.length}`);
+  }
+  const masked = new Uint8Array(bytes32);
+  masked[0]! &= 0x3f; // clear the top 2 bits -> 254-bit candidate
+  const v = fromBytesBE(masked);
+  if (v >= FR_MODULUS) return null;
+  if (nonzero && v === 0n) return null;
+  return v;
+}
+
+/**
+ * Cryptographically-random nonzero scalar, uniform on `[1, r)`: 32 CSPRNG
+ * bytes through {@link rejectionSample}, redrawing on rejection. Since `r` is
+ * just over ¾ of `2^254`, the loop redraws ~25% of the time and the output is
+ * uniform on the full range.
  */
 export function randomScalar(): bigint {
   for (;;) {
     const bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
-    bytes[0]! &= 0x3f; // clear the top 2 bits -> 254-bit candidate
-    const v = fromBytesBE(bytes);
-    if (v !== 0n && v < FR_MODULUS) return v;
+    const v = rejectionSample(bytes);
+    if (v !== null) return v;
   }
 }
