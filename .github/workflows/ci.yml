@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, so a change to OpenZeppelin's published fixtures surfaces here even
+  # when nothing in this repository has moved — a conformance claim that is
+  # only re-checked when we happen to commit is a claim about the past.
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   # Fast suite: no proof generation, runs on every push/PR.
@@ -19,6 +24,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # Keeps the vendored test/fixtures/ copy honest against upstream's
+      # circuits/lib/testdata (SDK.md §6.1); test/fixtures.mjs (in test:fast)
+      # then checks our crypto reproduces every vector byte-for-byte.
+      - run: node scripts/check-fixtures-upstream.mjs
       - run: pnpm test:fast
 
   # Full proving suite (UltraHonk proof generation + disclosure protocol).
