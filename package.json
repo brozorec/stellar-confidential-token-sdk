@@ -1,0 +1,56 @@
+{
+  "name": "stellar-confidential-token-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript SDK for confidential tokens on Stellar: Grumpkin/Poseidon2 cryptography, client-side UltraHonk proving, Soroban chain integration, and event-based state reconstruction.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brozorec/stellar-confidential-token-sdk.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./state/json-store": {
+      "types": "./dist/state/json-store.d.ts",
+      "import": "./dist/state/json-store.js"
+    },
+    "./proving/artifacts": {
+      "types": "./dist/proving/artifacts.d.ts",
+      "import": "./dist/proving/artifacts.js"
+    },
+    "./circuits/*": "./circuits/*"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "circuits"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx test/smoke.mjs && tsx test/parity.mjs && tsx test/payload.mjs && tsx test/auditor.mjs && tsx test/ephemeral.mjs && tsx test/dedup.mjs && tsx test/compliance-events.mjs && tsx test/contract-errors.mjs && tsx test/indexer-parity.mjs && tsx test/hybrid-indexer-failure.mjs && tsx test/prove.mjs && tsx test/disclosure.mjs",
+    "test:fast": "tsx test/smoke.mjs && tsx test/parity.mjs && tsx test/payload.mjs && tsx test/auditor.mjs && tsx test/ephemeral.mjs && tsx test/dedup.mjs && tsx test/compliance-events.mjs && tsx test/contract-errors.mjs && tsx test/indexer-parity.mjs && tsx test/hybrid-indexer-failure.mjs"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "0.87.0",
+    "@noble/curves": "^1.9.4",
+    "@noble/hashes": "^1.8.0",
+    "@noir-lang/noir_js": "1.0.0-beta.9",
+    "@stellar/stellar-sdk": "^14.2.0",
+    "@zkpassport/poseidon2": "^0.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

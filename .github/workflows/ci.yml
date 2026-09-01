@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Fast suite: no proof generation, runs on every push/PR.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:fast
+
+  # Full proving suite (UltraHonk proof generation + disclosure protocol).
+  # Slow and CRS-hungry, so main pushes and manual runs only.
+  prove:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Cache bb.js CRS
+        uses: actions/cache@v4
+        with:
+          path: ~/.bb-crs
+          key: bb-crs-0.87.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm exec tsx test/prove.mjs
+      - run: pnpm exec tsx test/disclosure.mjs
