@@ -68,6 +68,15 @@ export function encodeWithdrawData(w: WithdrawWitness, proof: Uint8Array): xdr.S
   return envelope(payload, proof);
 }
 
+/**
+ * `ClawbackData { proof }`: the clawback circuit has no prover-supplied public
+ * inputs (the contract rebuilds all eleven from state and arguments), so the
+ * envelope carries the proof alone.
+ */
+export function encodeClawbackData(proof: Uint8Array): xdr.ScVal {
+  return scvBytes(scvStruct({ proof: scvBytes(proof) }).toXDR());
+}
+
 export function encodeTransferData(w: TransferWitness, proof: Uint8Array): xdr.ScVal {
   const p = w.payload;
   const payload = scvStruct({

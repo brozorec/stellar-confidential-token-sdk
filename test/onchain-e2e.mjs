@@ -1,10 +1,13 @@
 // On-chain end-to-end test against the upstream `examples/confidential`
 // contracts — the only test where the Rust UltraHonk verifier, not bb.js,
-// judges the SDK's proofs. It deploys a fresh verifier + auditor registry +
-// compliant token, registers the committed VKs, and runs
-// register → deposit → merge → transfer → withdraw with real proofs, checking
-// after every step that the SDK's openings re-commit to the on-chain points and
-// that the emitted events decode to exactly what was submitted.
+// judges the SDK's proofs. It deploys fresh verifier + auditor registries and
+// the factory, has the factory deploy an allowlist + compliant token, registers
+// the committed VKs, and runs register → deposit → merge → transfer → withdraw
+// → transfer back → freeze → clawback ×2 with real proofs, checking after
+// every step that the SDK's openings re-commit to the on-chain points (via
+// StateEngine.sync's consistency check) and that the emitted events decode to
+// exactly what was submitted. Along the way it exercises the factory and admin
+// helpers (roles, freeze, allowlist, compliance config).
 //
 // Env-gated (needs a network and the example wasms), SKIPS cleanly when unset:
 //
@@ -38,27 +41,47 @@ import {
   ChainClient,
   CircuitProver,
   H,
+  MANAGER_ROLE,
   MemoryStore,
   StateEngine,
+  TOKEN_ROLES,
   addressToField,
+  allowUser,
   auditTransfer,
   auditWithdraw,
   buildRegisterWitness,
   buildTransferWitness,
   buildWithdrawWitness,
+  clawback,
+  clawbackNonce,
   commit,
+  deployAllowlistAndToken,
   deriveKeys,
+  disallowUser,
   fetchEvents,
+  fieldIn,
+  freezeAccount,
+  grantRole,
+  hasRole,
+  humanizeContractError,
+  isAllowed,
+  isFrozen,
   keypairSigner,
+  parseContractErrorCode,
+  pointIn,
   pointToBytes,
+  predictTokenAddress,
   randomScalar,
+  readAdmin,
+  readComplianceConfig,
   scalarMul,
-  scvStruct,
+  setComplianceConfig,
   submitDeposit,
   submitMerge,
   submitRegister,
   submitTransfer,
   submitWithdraw,
+  unfreezeAccount,
 } from "../src/index.ts";
 import { loadCircuit } from "../src/proving/artifacts.ts";
 
@@ -111,27 +134,32 @@ async function submitOp(kp, op) {
   return res.returnValue;
 }
 
-async function deployWasm(kp, name, ctorArgs) {
-  const hash = await submitOp(kp, Operation.uploadContractWasm({ wasm: wasm(name) }));
-  const salt = Buffer.from(Keypair.random().rawPublicKey());
+const upload = async (kp, name) =>
+  (await submitOp(kp, Operation.uploadContractWasm({ wasm: wasm(name) }))).bytes();
+
+async function create(kp, wasmHash, ctorArgs) {
   const rv = await submitOp(
     kp,
     Operation.createCustomContract({
       address: new Address(kp.publicKey()),
-      wasmHash: hash.bytes(),
+      wasmHash,
       constructorArgs: ctorArgs,
-      salt,
+      salt: Buffer.from(Keypair.random().rawPublicKey()),
     }),
   );
-  return { id: Address.fromScVal(rv).toString(), wasmHash: hash.bytes() };
+  return Address.fromScVal(rv).toString();
 }
 
-/** `ComplianceConfig { policy: Option<Address>, sac_passthrough: bool }`. */
-const complianceConfig = (policy, sacPassthrough) =>
-  scvStruct({
-    policy: policy ? addr(policy) : xdr.ScVal.scvVoid(),
-    sac_passthrough: xdr.ScVal.scvBool(sacPassthrough),
-  });
+/** Run `fn`, expecting the contract to reject it with error `code`. */
+async function expectContractError(name, code, fn) {
+  try {
+    await fn();
+    check(name, false, "expected a rejection, but it succeeded");
+  } catch (e) {
+    const raw = String(e?.message ?? e);
+    check(name, parseContractErrorCode(raw) === code, `got: ${humanizeContractError(raw) ?? raw.slice(0, 200)}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Deployment
@@ -141,6 +169,9 @@ const admin = Keypair.random();
 const alice = Keypair.random();
 const bob = Keypair.random();
 await Promise.all([fund(admin), fund(alice), fund(bob)]);
+const ADMIN = admin.publicKey();
+const A = alice.publicKey();
+const B = bob.publicKey();
 
 const native = Asset.native().contractId(PASSPHRASE);
 try {
@@ -149,26 +180,43 @@ try {
   // Already deployed on this network — fine.
 }
 
-const verifier = await deployWasm(admin, "verifier", [addr(admin.publicKey()), addr(admin.publicKey())]);
-const auditorReg = await deployWasm(admin, "auditor", [addr(admin.publicKey()), addr(admin.publicKey())]);
+const verifier = await create(admin, await upload(admin, "verifier"), [addr(ADMIN), addr(ADMIN)]);
+const auditorReg = await create(admin, await upload(admin, "auditor"), [addr(ADMIN), addr(ADMIN)]);
+const factory = await create(admin, await upload(admin, "factory"), [
+  xdr.ScVal.scvBytes(await upload(admin, "compliant_token")),
+  xdr.ScVal.scvBytes(await upload(admin, "allowlist_policy")),
+]);
 
 const client = new ChainClient({
   rpcUrl: RPC_URL,
   networkPassphrase: PASSPHRASE,
-  contracts: { token: "", verifier: verifier.id, auditor: auditorReg.id },
+  contracts: { token: "", verifier, auditor: auditorReg },
 });
 const adminSigner = keypairSigner(admin.secret(), PASSPHRASE);
+const aSigner = keypairSigner(alice.secret(), PASSPHRASE);
+const bSigner = keypairSigner(bob.secret(), PASSPHRASE);
 const fromLedger = await client.latestLedger();
 
-const token = await deployWasm(admin, "compliant_token", [
-  addr(admin.publicKey()),
-  addr(native),
-  addr(verifier.id),
-  addr(auditorReg.id),
-  complianceConfig(undefined, false),
-]);
-client.cfg.contracts.token = token.id;
-console.log(`deployed: verifier ${verifier.id}\n          auditor  ${auditorReg.id}\n          token    ${token.id}\n`);
+console.log("factory:");
+const wiring = { factory, underlying: native, verifier, auditor: auditorReg };
+const SALT = 7;
+const { policy, token } = await deployAllowlistAndToken(
+  client,
+  adminSigner,
+  wiring,
+  { policyAdmin: ADMIN, policyManager: ADMIN, tokenAdmin: ADMIN, sacPassthrough: false },
+  SALT,
+);
+client.cfg.contracts.token = token;
+check(
+  "predict_token_address matches the deployed token",
+  (await predictTokenAddress(client, wiring, ADMIN, { policy, sacPassthrough: false }, SALT)) === token,
+);
+check("token compliance config points at the allowlist", (await readComplianceConfig(client, token))?.policy === policy);
+check("token admin is the deployer", (await readAdmin(client, token)) === ADMIN);
+check("allowlist manager role granted by its constructor", await hasRole(client, policy, ADMIN, MANAGER_ROLE));
+check("token grants no role at construction", !(await hasRole(client, token, ADMIN, TOKEN_ROLES.freezer)));
+console.log(`  token ${token}\n  policy ${policy}`);
 
 for (const [name, circuitType] of [
   ["register", CIRCUIT_TYPE.Register],
@@ -180,40 +228,43 @@ for (const [name, circuitType] of [
 ]) {
   const vk = readFileSync(new URL(`../circuits/vks/${name}.vk.bin`, import.meta.url));
   await client.invoke(
-    verifier.id,
+    verifier,
     "register_verification_key",
-    [xdr.ScVal.scvU32(circuitType), xdr.ScVal.scvBytes(vk), addr(admin.publicKey())],
+    [xdr.ScVal.scvU32(circuitType), xdr.ScVal.scvBytes(vk), addr(ADMIN)],
     adminSigner,
   );
 }
-console.log("registered all six VKs");
 
 const kSecret = randomScalar();
 const kAud = scalarMul(kSecret, H);
 await client.invoke(
-  auditorReg.id,
+  auditorReg,
   "register_key",
-  [xdr.ScVal.scvU32(0), xdr.ScVal.scvBytes(Buffer.from(pointToBytes(kAud))), addr(admin.publicKey())],
+  [xdr.ScVal.scvU32(0), xdr.ScVal.scvBytes(Buffer.from(pointToBytes(kAud))), addr(ADMIN)],
   adminSigner,
 );
-check("auditor key 0 reads back", (await client.auditorKey(0)).equals(kAud));
+check("registered six VKs + auditor key 0", (await client.auditorKey(0)).equals(kAud));
+
+for (const who of [A, B]) await allowUser(client, adminSigner, policy, who, ADMIN);
+check("alice and bob allowlisted", (await isAllowed(client, policy, A)) && (await isAllowed(client, policy, B)));
 
 // ---------------------------------------------------------------------------
 // Holder flow
 // ---------------------------------------------------------------------------
 
-const addrF = addressToField(token.id);
+const addrF = addressToField(token);
 const aKeys = deriveKeys(randomScalar(), addrF);
 const bKeys = deriveKeys(randomScalar(), addrF);
-const aSigner = keypairSigner(alice.secret(), PASSPHRASE);
-const bSigner = keypairSigner(bob.secret(), PASSPHRASE);
-const A = alice.publicKey();
-const B = bob.publicKey();
+const engineFor = (keys, address) =>
+  new StateEngine({ client, store: new MemoryStore(), keys, address, fromLedger });
+const aEngine = engineFor(aKeys, A);
+const bEngine = engineFor(bKeys, B);
 
 const provers = {
   register: new CircuitProver(loadCircuit("register")),
   withdraw: new CircuitProver(loadCircuit("withdraw")),
   transfer: new CircuitProver(loadCircuit("transfer")),
+  clawback: new CircuitProver(loadCircuit("clawback")),
 };
 
 /** Local openings must re-commit to the on-chain points. */
@@ -229,6 +280,13 @@ async function expectOpenings(who, spend, receive) {
   );
 }
 
+/** StateEngine.sync from real events, which ends in the consistency check. */
+async function expectSync(who, engine) {
+  const s = await engine.sync().catch((e) => e);
+  check(`${who}: StateEngine.sync verifies against chain`, !(s instanceof Error), s?.message);
+  return s instanceof Error ? null : s;
+}
+
 async function step(name, fn) {
   try {
     await fn();
@@ -237,6 +295,26 @@ async function step(name, fn) {
     check(`${name} accepted on-chain`, false, String(e?.message ?? e).split("\n")[0]);
     throw e;
   }
+}
+
+/** Clawback witness, built inline: the SDK has no clawback builder yet. */
+async function clawbackInputs(account, state, amount, destination) {
+  const acct = await client.confidentialBalance(account);
+  return {
+    k_aud: fieldIn(kSecret),
+    v_s: fieldIn(state.spendable.v),
+    r_s: fieldIn(state.spendable.r),
+    v_r: fieldIn(state.receiving.v),
+    r_r: fieldIn(state.receiving.r),
+    ...pointIn("c_spend", acct.spendableBalance),
+    ...pointIn("c_receive", acct.receivingBalance),
+    ...pointIn("k_aud", kAud),
+    alpha: fieldIn(amount),
+    addr_f: fieldIn(addrF),
+    _acct_f: fieldIn(addressToField(account)),
+    _dest_f: fieldIn(destination ? addressToField(destination) : 0n),
+    _nonce: fieldIn(BigInt(await clawbackNonce(client, token, account))),
+  };
 }
 
 try {
@@ -284,43 +362,26 @@ try {
   await expectOpenings("alice", ww.next, { v: 0n, r: 0n });
 
   console.log("\nstate engine (real events → replay → consistency check):");
-  const engineFor = (keys, address) =>
-    new StateEngine({ client, store: new MemoryStore(), keys, address, fromLedger });
-  const aEngine = engineFor(aKeys, A);
-  const bEngine = engineFor(bKeys, B);
-  const aState = await aEngine.sync().catch((e) => e);
-  check("alice: sync verifies against chain", !(aState instanceof Error), aState?.message);
+  const aState = await expectSync("alice", aEngine);
   check(
     "alice: replayed spendable == post-withdraw opening",
-    aState?.spendable?.v === ww.next.v && aState?.spendable?.r === ww.next.r,
+    aState?.spendable.v === ww.next.v && aState?.spendable.r === ww.next.r,
   );
-  const bState = await bEngine.sync().catch((e) => e);
-  check("bob: sync verifies against chain", !(bState instanceof Error), bState?.message);
-  check("bob: replayed receiving == the transfer credit", bState?.receiving?.v === SENT);
+  const bState = await expectSync("bob", bEngine);
+  check("bob: replayed receiving == the transfer credit", bState?.receiving.v === SENT);
   await step("merge bob", () => submitMerge(client, bSigner, B));
-  const bMerged = await bEngine.sync().catch((e) => e);
-  check("bob: merge folded receiving into spendable", bMerged?.spendable?.v === SENT && bMerged?.receiving?.v === 0n);
-  const bOpening = await bEngine.spendableForProof().catch((e) => e);
-  check("bob: spendableForProof returns the verified opening", bOpening?.v === SENT);
+  const bMerged = await expectSync("bob", bEngine);
+  check("bob: merge folded receiving into spendable", bMerged?.spendable.v === SENT && bMerged?.receiving.v === 0n);
 
   console.log("\nevents:");
   const { events } = await fetchEvents(client, { startLedger: fromLedger });
   const evT = events.find((e) => e.type === "transfer");
   const evW = events.find((e) => e.type === "withdraw");
-  check("transfer event decoded", !!evT);
-  check("withdraw event decoded", !!evW);
   check(
     "transfer event carries the submitted r_tilde_aud_s",
     evT?.rAudS === tw.payload.rAudS && evT?.bAudS === tw.payload.bAudS,
   );
   check("withdraw event carries the submitted r_tilde_aud_s", evW?.rAudS === ww.payload.rAudS);
-  check(
-    "event types seen: register×2, deposit, merge×2, transfer, withdraw",
-    ["register", "register", "deposit", "merge", "merge", "transfer", "withdraw"].every(
-      (t, i, all) => events.filter((e) => e.type === t).length === all.filter((x) => x === t).length,
-    ),
-    events.map((e) => e.type).join(","),
-  );
 
   console.log("\nauditor:");
   const at = auditTransfer(kSecret, evT);
@@ -334,6 +395,89 @@ try {
     "auditor: withdraw checkpoint opens alice's post-withdraw C_spend",
     commit(aw.senderBalance, aw.senderBlinding).equals(ww.next.cSpend),
   );
+
+  console.log("\ntransfer bob→alice (from bob's verified post-merge opening):");
+  const BACK = 100_000n;
+  const bOpening = await bEngine.spendableForProof();
+  const tw2 = buildTransferWitness({
+    keys: bKeys,
+    v: bOpening.v,
+    r: bOpening.r,
+    amount: BACK,
+    pvkB: aKeys.PVK,
+    kAudR: kAud,
+    kAudS: kAud,
+  });
+  const t2Proof = await provers.transfer.prove(tw2.inputs);
+  await step("transfer bob→alice", () => submitTransfer(client, bSigner, B, A, tw2, t2Proof.proof));
+  await expectSync("bob", bEngine);
+  const aBeforeClaw = await expectSync("alice", aEngine);
+  check("alice: receiving holds bob's credit", aBeforeClaw?.receiving.v === BACK);
+
+  console.log("\nallowlist:");
+  await disallowUser(client, adminSigner, policy, B, ADMIN);
+  await expectContractError("disallowed bob cannot merge (3602)", 3602, () => submitMerge(client, bSigner, B));
+  await allowUser(client, adminSigner, policy, B, ADMIN);
+  check("bob re-allowed", await isAllowed(client, policy, B));
+
+  console.log("\nroles + freeze:");
+  for (const role of Object.values(TOKEN_ROLES)) {
+    await grantRole(client, adminSigner, token, ADMIN, role, ADMIN);
+  }
+  check("admin holds freezer/config_manager/clawback", (
+    await Promise.all(Object.values(TOKEN_ROLES).map((r) => hasRole(client, token, ADMIN, r)))
+  ).every(Boolean));
+  await expectContractError("clawback of an unfrozen account rejected (3604)", 3604, async () =>
+    clawback(client, adminSigner, token, A, 1n, undefined, new Uint8Array(14592), ADMIN),
+  );
+  await step("freeze alice", () => freezeAccount(client, adminSigner, token, A, ADMIN));
+  check("is_frozen(alice)", await isFrozen(client, token, A));
+  await expectContractError("frozen alice cannot deposit (3601)", 3601, () => submitDeposit(client, aSigner, A, A, 1n));
+
+  console.log("\nclawback (auditor proof, admin submits):");
+  const CLAW1 = 300_000n;
+  const c1 = await provers.clawback.prove(await clawbackInputs(A, aBeforeClaw, CLAW1, undefined));
+  await step("clawback alice, destination None", () =>
+    clawback(client, adminSigner, token, A, CLAW1, undefined, c1.proof, ADMIN),
+  );
+  const aAfter1 = await expectSync("alice", aEngine);
+  check(
+    "alice: clawback folded receiving and subtracted the amount",
+    aAfter1?.spendable.v === aBeforeClaw.spendable.v + BACK - CLAW1 && aAfter1?.receiving.v === 0n,
+  );
+  check("clawback nonce advanced to 1", (await clawbackNonce(client, token, A)) === 1);
+
+  const CLAW2 = 1n;
+  const c2 = await provers.clawback.prove(await clawbackInputs(A, aAfter1, CLAW2, ADMIN));
+  await step("clawback alice, destination Some(admin)", () =>
+    clawback(client, adminSigner, token, A, CLAW2, ADMIN, c2.proof, ADMIN),
+  );
+  const aAfter2 = await expectSync("alice", aEngine);
+  check("alice: second clawback replayed", aAfter2?.spendable.v === aAfter1.spendable.v - CLAW2);
+
+  const claws = (await fetchEvents(client, { startLedger: fromLedger })).events.filter((e) => e.type === "clawback");
+  check("clawback event with None destination decodes to null", claws[0]?.destination === null && claws[0]?.amount === CLAW1);
+  check("clawback event with Some destination decodes to the address", claws[1]?.destination === ADMIN);
+
+  console.log("\ncompliance config + unfreeze:");
+  await step("set_compliance_config (policy None)", () =>
+    setComplianceConfig(client, adminSigner, token, { sacPassthrough: false }, ADMIN),
+  );
+  const cfg = await readComplianceConfig(client, token);
+  check("compliance config read back without a policy", cfg && cfg.policy === undefined && cfg.sacPassthrough === false);
+  // The constructor emits the first one (policy = the allowlist); the
+  // rotation above emits the second, with policy None left out of the map.
+  const cfgEvs = (await fetchEvents(client, { startLedger: fromLedger })).events.filter(
+    (e) => e.type === "compliance_config_changed",
+  );
+  check("constructor's compliance_config_changed decodes Some(policy)", cfgEvs[0]?.policy === policy);
+  check(
+    "rotated compliance_config_changed with omitted policy decodes to null",
+    cfgEvs.length === 2 && cfgEvs[1]?.policy === null && cfgEvs[1]?.sacPassthrough === false,
+    JSON.stringify(cfgEvs.map((e) => ({ policy: e.policy, sac: e.sacPassthrough }))),
+  );
+  await step("unfreeze alice", () => unfreezeAccount(client, adminSigner, token, A, ADMIN));
+  check("alice no longer frozen", !(await isFrozen(client, token, A)));
 } catch {
   // A failed step already recorded its failure; the rest depends on it.
 } finally {

@@ -15,9 +15,9 @@ pnpm exec tsx test/<name>.mjs   # run one test
 
 There is no linter and no test framework. Tests are plain `.mjs` scripts run under `tsx`; each keeps its own `pass`/`fail` counters and ends with `process.exit(fail === 0 ? 0 : 1)`. They import **`../src/*.ts` directly**, so `pnpm build` is not a prerequisite for running them.
 
-`pnpm test` / `pnpm test:fast` are hand-maintained `&&` chains in `package.json` — a new test file runs in CI only once it is added to those chains. (`test/shape-filter.mjs` currently is not in either.)
+`pnpm test` / `pnpm test:fast` are hand-maintained `&&` chains in `package.json` — a new test file runs in CI only once it is added to those chains.
 
-Env-gated tests (`indexer-parity.mjs`, `shape-filter.mjs`) skip cleanly with exit 0 unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set; `CTD_RPC_URL` and `CTD_FROM_LEDGER` are optional overrides. CI (`.github/workflows/ci.yml`) runs `test:fast` on every PR and the two proving tests on main pushes only.
+Env-gated tests (`indexer-parity.mjs`, `shape-filter.mjs`) skip cleanly with exit 0 unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set; `CTD_RPC_URL` and `CTD_FROM_LEDGER` are optional overrides. `onchain-e2e.mjs` (in `pnpm test` only) skips unless `CTD_E2E_RPC_URL` and `CTD_E2E_WASM_DIR` are set; it deploys the upstream `examples/confidential` wasms to a friendbot network (its header has the quickstart recipe) and is the only test where the Rust verifier judges SDK proofs. CI (`.github/workflows/ci.yml`) runs `test:fast` on every PR, the two proving tests on main pushes only, and the upstream fixture drift check as its own job.
 
 ## What this package is
 
@@ -34,7 +34,7 @@ Data flows `crypto → witness → proving → chain`, with `state`, `auditor`, 
 - **`proving/`** — `CircuitProver` wraps a `noir_js` solver + a lazily created `bb.js` `UltraHonkBackend`. Construct once per circuit and reuse; call
   `destroy()`.
 - **`chain/`** — `ChainClient` (simulate / invoke / poll), `payload.ts` (XDR envelopes), `contract.ts` (per-entry-point submitters), `events.ts` (RPC event
-  decode), `indexer.ts` (Goldsky JSON decode), `event-source.ts` (hybrid), plus `factory.ts`, `admin.ts`, `errors.ts` for the dashboard/admin personas.
+  decode), `indexer.ts` (Goldsky JSON decode), `event-source.ts` (hybrid), plus `factory.ts`, `admin.ts` (targeting the upstream `examples/confidential/{factory,compliant-token,allowlist-policy}`: `u32` deploy salts, access-control roles), `errors.ts` for the dashboard/admin personas.
 - **`state/`** — `StateEngine` replays events into `{v, r}` openings behind a pluggable `StateStore`.
 - **`auditor/`** — decrypts the auditor channels from a raw event + the auditor secret `k`. No holder cooperation needed.
 - **`disclosure/`** — off-chain selective disclosure: holder proves, receiver
@@ -44,7 +44,7 @@ Data flows `crypto → witness → proving → chain`, with `state`, `auditor`, 
 
 **Keccak transcript is mandatory.** Every proof is generated and verified with `{ keccak: true }` (`KECCAK` in `proving/prover.ts`) because the on-chain verifier uses keccak256 Fiat–Shamir. A default-transcript proof verifies locally and fails on-chain.
 
-**Domain tags are the wire format.** `DOMAIN` in `crypto/constants.ts` is exactly `1n..16n`, distinct, one sponge mode each (11/12 are the two-squeeze tags). Tags 1–13 are absorbed on-chain or in-circuit; 14–16 are absorbed nowhere, so drift there breaks *cross-client* reads silently — nothing fails. `test/smoke.mjs` pins all sixteen; treat that test as the spec.
+**Domain tags are the wire format.** `DOMAIN` in `crypto/constants.ts` is exactly `1n..17n`, distinct, one sponge mode each (11 is squeezed three-wide, 12 two-wide). Tags 1–13 and 17 are absorbed on-chain or in-circuit; 14–16 are absorbed nowhere, so drift there breaks *cross-client* reads silently — nothing fails. `test/smoke.mjs` pins all seventeen; treat that test as the spec.
 
 **`fpAdd` vs `frAdd`.** Blinding factors accumulate mod `p` (the Grumpkin group order, `FP_MODULUS`), values mod `r` (`FR_MODULUS`). Using `frAdd` on a blinding sum diverges by `p - r` about half the time and only surfaces as an on-chain commitment mismatch after a merge.
 
@@ -77,9 +77,9 @@ In the browser, import circuit JSON through the bundler and pass it to `proverFr
 
 ## Circuit artifacts
 
-`circuits/*.json` (register/withdraw/transfer), `circuits/disclosure/*.json` + pinned `*.vk.json`, and `circuits/vks/*.vk.bin` (the VKs registered with the on-chain verifier; not read by SDK code, shipped for deployment tooling).
+`circuits/*.json` (register/withdraw/transfer/clawback, compiled from stellar-contracts `v0.8.0`), `circuits/disclosure/*.json` + pinned `*.vk.json` (not from upstream), and `circuits/vks/*.vk.bin` (the VKs registered with the on-chain verifier, including set_spender/spender_transfer; not read by SDK code, shipped for deployment tooling). `circuits/manifest.json` records the upstream tag/commit, toolchain and a sha256 per upstream file; `test/artifacts.mjs` fails on any unrecorded or changed file, and `test/prove.mjs` checks each bb.js-derived VK equals its `.vk.bin`.
 
-Artifacts and code version together — a proof only verifies against a verifier contract whose registered VKs came from these exact circuits. For disclosure, prover and receiver must load *identical* files. All committed artifacts are compiled with nargo `1.0.0-beta.11`, while `@noir-lang/noir_js` is pinned at `1.0.0-beta.9`; the docstring in `proving/artifacts.ts` still says beta.9.
+Artifacts and code version together — a proof only verifies against a verifier contract whose registered VKs came from these exact circuits. For disclosure, prover and receiver must load *identical* files. All committed artifacts are compiled with nargo `1.0.0-beta.11`, while `@noir-lang/noir_js` is pinned at `1.0.0-beta.9`.
 
 ## TypeScript notes
 
