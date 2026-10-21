@@ -24,11 +24,23 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # Keeps the vendored test/fixtures/ copy honest against upstream's
-      # circuits/lib/testdata (SDK.md §6.1); test/fixtures.mjs (in test:fast)
-      # then checks our crypto reproduces every vector byte-for-byte.
-      - run: node scripts/check-fixtures-upstream.mjs
       - run: pnpm test:fast
+
+  # Keeps the vendored test/fixtures/ copy honest against upstream's
+  # packages/confidential/circuits/lib/testdata; test/fixtures.mjs (in
+  # test:fast) then checks our crypto reproduces every vector byte-for-byte.
+  # Its own job so an upstream move (or path change) reports red here without
+  # ever stopping the test job from running.
+  fixtures-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-fixtures-upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   # Full proving suite (UltraHonk proof generation + disclosure protocol).
   # Slow and CRS-hungry, so main pushes and manual runs only.

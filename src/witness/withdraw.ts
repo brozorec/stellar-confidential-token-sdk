@@ -9,12 +9,9 @@
 
 import type { KeyPair } from "../crypto/keys.js";
 import { H, commit, scalarMul, ecdh, type Point } from "../crypto/grumpkin.js";
-import { randomScalar } from "../crypto/field.js";
-import {
-  deriveSpendR,
-  encryptBalance,
-  encryptAuditorSenderBalance,
-} from "../crypto/poseidon2.js";
+import { randomScalar, frAdd } from "../crypto/field.js";
+import { DOMAIN } from "../crypto/constants.js";
+import { deriveSpendR, encryptBalance, spongeSqueeze3 } from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 export interface WithdrawParams {
@@ -63,7 +60,8 @@ export function buildWithdrawWitness(p: WithdrawParams): WithdrawWitness {
   const bTilde = encryptBalance(vNew, keys.vk, sigma);
   const rePoint = scalarMul(rE, H);
   const sAsX = ecdh(rE, kAudS);
-  const bAudS = encryptAuditorSenderBalance(vNew, sAsX, sigma);
+  const mS = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
+  const bAudS = frAdd(vNew, mS[1]);
 
   const inputs: NoirInputs = {
     sk: fieldIn(keys.sk),

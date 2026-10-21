@@ -55,15 +55,28 @@ export function poseidonWithDomain(d: bigint, inputs: bigint[]): bigint {
 }
 
 /**
- * Two-squeeze sponge (`lib.nr::sponge_squeeze_2`): absorbs `(d, s, sigma)` — `s`
- * being the ECDH shared-secret scalar from {@link ecdh} — in one block and
- * returns `[state[0], state[1]]`. Index 0 is the amount mask, index 1 is the
- * balance/randomness mask.
+ * Three-squeeze sponge (`lib.nr::sponge_squeeze_3`): absorbs `(d, s, sigma)` —
+ * `s` being the ECDH shared-secret scalar from {@link ecdh} — in one block and
+ * returns `[state[0], state[1], state[2]]`. Lane 0 is the amount mask, lane 1
+ * the balance/allowance mask, lane 2 the escrow of the blinding the operation
+ * writes. Only the sender-auditor channel ({@link DOMAIN.AUDITOR_SENDER}) is
+ * read three-wide.
  */
-export function spongeSqueeze2(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint] {
+export function spongeSqueeze3(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint, bigint] {
   const iv = frMod(3n * POSEIDON2_IV_BASE);
   const state = permute([d, sx, sigma, iv]);
-  return [state[0]!, state[1]!];
+  return [state[0]!, state[1]!, state[2]!];
+}
+
+/**
+ * Two-squeeze sponge (`lib.nr::sponge_squeeze_2`): the first two lanes of
+ * {@link spongeSqueeze3} — same absorb, same permutation. Index 0 is the amount
+ * mask, index 1 the randomness mask. Only the recipient-auditor channel
+ * ({@link DOMAIN.AUDITOR_RECIPIENT}) is read two-wide.
+ */
+export function spongeSqueeze2(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint] {
+  const [m0, m1] = spongeSqueeze3(d, sx, sigma);
+  return [m0, m1];
 }
 
 // ---------------------------------------------------------------------------
@@ -131,20 +144,11 @@ export const encryptEscDvk = (dvk: bigint, s: bigint, opI: bigint): bigint =>
   frAdd(dvk, poseidonWithDomain(DOMAIN.ESCROWED_DELEGATION_VIEWING_KEY, [s, opI]));
 
 /**
- * Sender-auditor balance checkpoint for the single-ciphertext circuits (Withdraw
- * W_a3/W_a4): `b_tilde_aud_s = v_new + sponge_squeeze_2(AUDITOR_SENDER, s, sigma)[1]`.
- *
- * The pad is the sponge's SECOND squeeze — the balance slot every two-ciphertext
- * sender channel uses — not a standalone `poseidonWithDomain` call (what this was
- * before). The first squeeze is reserved for amount masks, so a balance
- * checkpoint never shares a pad with an amount ciphertext even if an
- * `(r_e, sigma)` pair were reused across operations.
+ * `r_a_tilde_aud_s = r_a + Poseidon2(ESCROWED_ALLOWANCE_BLINDING_AUDITOR, s_a_s, op_i)`
+ * — the set_spender allowance-blinding escrow to the owner's auditor (S14).
  */
-export const encryptAuditorSenderBalance = (
-  vNew: bigint,
-  sAsX: bigint,
-  sigma: bigint,
-): bigint => frAdd(vNew, spongeSqueeze2(DOMAIN.AUDITOR_SENDER, sAsX, sigma)[1]);
+export const encryptEscAllowRAuditor = (rA: bigint, sAs: bigint, opI: bigint): bigint =>
+  frAdd(rA, poseidonWithDomain(DOMAIN.ESCROWED_ALLOWANCE_BLINDING_AUDITOR, [sAs, opI]));
 
 /**
  * `v_tilde_disc = v_tx + Poseidon2(DISCLOSURE, s_disc_x, nu)` — the U3 stage

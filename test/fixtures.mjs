@@ -3,7 +3,8 @@
 // files rather than transcribe their values into source".
 //
 // So this test enumerates test/fixtures/*.json AT RUNTIME (vendored from
-// OpenZeppelin/stellar-contracts circuits/lib/testdata; kept in lockstep by
+// OpenZeppelin/stellar-contracts
+// packages/confidential/circuits/lib/testdata; kept in lockstep by
 // scripts/check-fixtures-upstream.mjs) and derives its cases from whatever the
 // files contain. A fixture added upstream and re-vendored lands here as an
 // UNMAPPED failure — never as silence — and a changed vector becomes a hex
@@ -21,6 +22,7 @@ import { G, H, Grumpkin, scalarMul, commit, ecdh } from "../src/crypto/grumpkin.
 import {
   poseidonWithDomain,
   spongeSqueeze2,
+  spongeSqueeze3,
   vkFromSk,
   dvkFromVkOp,
   deriveSpendR,
@@ -30,7 +32,7 @@ import {
   encryptBalance,
   encryptAllowance,
   encryptEscDvk,
-  encryptAuditorSenderBalance,
+  encryptEscAllowRAuditor,
 } from "../src/crypto/poseidon2.ts";
 import { addressToField } from "../src/crypto/address.ts";
 
@@ -77,14 +79,15 @@ const HANDLERS = {
   ecdh: (i) => hex32(ecdh(F(i.scalar), resolvePoint(i.point))),
   encrypt_allowance: (i) => hex32(encryptAllowance(F(i.v_a), F(i.dvk), F(i.sigma_a))),
   encrypt_amount: (i) => hex32(encryptAmount(F(i.v_transfer), F(i.s), F(i.sigma))),
-  encrypt_auditor_sender_balance: (i) =>
-    hex32(encryptAuditorSenderBalance(F(i.v_new), F(i.s_a_s), F(i.sigma))),
   encrypt_balance: (i) => hex32(encryptBalance(F(i.v_new), F(i.vk), F(i.sigma))),
+  encrypt_esc_allow_r_auditor: (i) =>
+    hex32(encryptEscAllowRAuditor(F(i.r_a), F(i.s_a_s), F(i.op_i))),
   encrypt_esc_dvk: (i) => hex32(encryptEscDvk(F(i.dvk), F(i.s), F(i.op_i))),
   poseidon_with_domain: (i) => hex32(poseidonWithDomain(F(i.domain), i.inputs.map(F))),
   pvk_from_vk: (i) => pointOut(scalarMul(F(i.vk), H)),
   scalar_mul: (i) => pointOut(scalarMul(F(i.scalar), resolvePoint(i.point))),
   sponge_squeeze_2: (i) => spongeSqueeze2(F(i.d), F(i.s), F(i.sigma)).map(hex32),
+  sponge_squeeze_3: (i) => spongeSqueeze3(F(i.d), F(i.s), F(i.sigma)).map(hex32),
   vk_from_sk: (i) => hex32(vkFromSk(F(i.sk), F(i.wrap))),
 };
 

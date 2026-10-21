@@ -1,6 +1,7 @@
 // Verify the vendored §6.1 fixtures (test/fixtures/) are byte-identical to
-// OpenZeppelin's circuits/lib/testdata on `main`, and that upstream has grown
-// no fixture we haven't vendored.
+// OpenZeppelin's packages/confidential/circuits/lib/testdata on `main` (or on
+// the ref in $UPSTREAM_REF), and that upstream has grown no fixture we haven't
+// vendored.
 //
 // The fixtures are vendored so `pnpm test:fast` stays hermetic and runs
 // offline. The cost of vendoring is that the copy can silently become a fork
@@ -14,13 +15,20 @@
 // `node scripts/vendor-fixtures.mjs <sha>`, review the diff, re-run
 // `pnpm exec tsx test/fixtures.mjs`, and update the pin below.
 //
-// Exit code: 1 on drift, on an upstream file that is gone (HTTP 404), or on a
-// new upstream fixture we don't vendor. Plain network failures (offline, 5xx)
-// only warn and exit 0 — an offline run must not false-alarm, and the weekly
-// networked CI run is the one that carries the conformance claim.
+// Exit code: 1 on drift, on an upstream file that is gone (HTTP 404), on a
+// directory listing that is gone (HTTP 404 — the path moved, as it did when the
+// crate split out of packages/tokens), or on a new upstream fixture we don't
+// vendor. Plain network failures (offline, 5xx, API rate limit) only warn and
+// exit 0 — an offline run must not false-alarm, and the weekly networked CI run
+// is the one that carries the conformance claim. Set GITHUB_TOKEN to lift the
+// API rate limit.
+//
+// The comparison target is `main`, not the pin, on purpose: comparing against
+// the vendored commit would only re-prove the copy, never detect that the spec
+// moved. CI runs this as its own job, so drift reports without blocking tests.
 //
 // Vendored from OpenZeppelin/stellar-contracts commit:
-//   fbfde388e1b72afa93d6b1c922067879b20e81db  (2026-09-01)
+//   ddc327eb92d63709436da3a8455f641c2d5476c5  (v0.8.0, 2026-10-20)
 
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -30,9 +38,12 @@ import { createHash } from "node:crypto";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "..", "test", "fixtures");
 
-const UPSTREAM_PATH = "packages/tokens/src/confidential/circuits/lib/testdata";
-const RAW = `https://raw.githubusercontent.com/OpenZeppelin/stellar-contracts/main/${UPSTREAM_PATH}`;
-const API = `https://api.github.com/repos/OpenZeppelin/stellar-contracts/contents/${UPSTREAM_PATH}`;
+const UPSTREAM_PATH = "packages/confidential/circuits/lib/testdata";
+const REF = process.env.UPSTREAM_REF || "main";
+const RAW = `https://raw.githubusercontent.com/OpenZeppelin/stellar-contracts/${REF}/${UPSTREAM_PATH}`;
+const API = `https://api.github.com/repos/OpenZeppelin/stellar-contracts/contents/${UPSTREAM_PATH}?ref=${REF}`;
+const API_HEADERS = { accept: "application/vnd.github+json" };
+if (process.env.GITHUB_TOKEN) API_HEADERS.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
 
 const sha = (buf) => createHash("sha256").update(buf).digest("hex").slice(0, 16);
 
@@ -84,8 +95,13 @@ for (const file of files) {
 // New upstream fixtures are new conformance obligations (§6.1 covers "every
 // file"), so an unvendored one is a failure, not a curiosity.
 try {
-  const resp = await fetch(API, { headers: { accept: "application/vnd.github+json" } });
-  if (resp.ok) {
+  const resp = await fetch(API, { headers: API_HEADERS });
+  if (resp.status === 404) {
+    // The whole directory is gone: the per-file checks above 404'd too, but
+    // say so once, plainly — the fixtures moved, they did not each vanish.
+    console.error(`!! upstream fixture directory GONE (404): ${UPSTREAM_PATH}@${REF}`);
+    missing++;
+  } else if (resp.ok) {
     const listing = await resp.json();
     const upstreamNames = listing
       .map((e) => e.name)
