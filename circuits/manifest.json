@@ -1,0 +1,30 @@
+{
+  "source": {
+    "repository": "https://github.com/OpenZeppelin/stellar-contracts",
+    "crate": "stellar-confidential 0.8.0",
+    "tag": "v0.8.0",
+    "commit": "ddc327eb92d63709436da3a8455f641c2d5476c5",
+    "path": "packages/confidential/circuits"
+  },
+  "toolchain": {
+    "nargo": "1.0.0-beta.11",
+    "bb": "0.87.0"
+  },
+  "notes": [
+    "<name>.json is `nargo compile --package circuit_<name>` output with file_map source paths made repo-relative (debug-only field; bytecode and abi untouched).",
+    "vks/<name>.vk.bin is copied verbatim from upstream vks/ and was reproduced byte-for-byte by upstream scripts/build_vk_bins.sh.",
+    "circuits/disclosure/ is not from stellar-contracts and is not covered here."
+  ],
+  "sha256": {
+    "register.json": "3e752a84cebd6c65e4a05e73a93faf1ee3d2f6b88eca87feb60f1aabf1b6e581",
+    "withdraw.json": "85f5fec0e95cc889279a997641694890b71b0a133f3cfb17731e80326d7b41d0",
+    "transfer.json": "56f80e69852160b8173e8fb2e1443214cd20298feda5944a2fe30a85b81dea7f",
+    "clawback.json": "15e9dce251c0d06bae948e517ae7063b8eec836cb4914c2a897c756bd6864d60",
+    "vks/register.vk.bin": "f994f89b761fac6905926971ab43a60928e39449dbabe934c32d3e13540c3f51",
+    "vks/withdraw.vk.bin": "9af904154ad8a92861cb2064e499d777ef571a3144636f549263fe8f5a28af74",
+    "vks/transfer.vk.bin": "cd77164631a37072d9ef85413b63f12dbaf7720a7c9069afc07277b02932b963",
+    "vks/set_spender.vk.bin": "8e5fc7db817e6ba1a536f9b1f98bc75e64ce14e35f636d7f05ca22ed7a8fd656",
+    "vks/spender_transfer.vk.bin": "c979e925ba265e207dd0de919dc29577e270bf7f75340a487e0d1b6396394ddc",
+    "vks/clawback.vk.bin": "665eb9cf680c89228084647b0d601183f44678c259ed400bd08226024310560b"
+  }
+}

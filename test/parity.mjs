@@ -97,6 +97,13 @@ await expectReject("tampered b_tilde_aud_s rejected", async () => {
   const { inputs } = buildWithdrawWitness({ keys, v: 1000n, r: 0n, amount: 400n, kAudS: auditorKey() });
   await withdrawNoir.execute({ ...inputs, b_tilde_aud_s: "0x123456" });
 });
+// W_a5: the escrowed blinding is the THIRD lane of the sender sponge over r'.
+// A lane-1 pad (the old two-wide reading) or the raw r' must both fail.
+await expectReject("tampered r_tilde_aud_s rejected", async () => {
+  const keys = deriveKeys(randomScalar(), addrF);
+  const { inputs } = buildWithdrawWitness({ keys, v: 1000n, r: 0n, amount: 400n, kAudS: auditorKey() });
+  await withdrawNoir.execute({ ...inputs, r_tilde_aud_s: inputs.b_tilde_aud_s });
+});
 
 console.log("transfer:");
 await expectOk("dual-auditor transfer (v=1000, v_tx=250)", async () => {
@@ -126,6 +133,20 @@ await expectReject("tampered v_tilde_aud_r rejected", async () => {
     kAudS: auditorKey(),
   });
   await transferNoir.execute({ ...inputs, v_tilde_aud_r: "0xdead" });
+});
+await expectReject("tampered r_tilde_aud_s rejected", async () => {
+  const sender = deriveKeys(randomScalar(), addrF);
+  const recipient = deriveKeys(randomScalar(), addrF);
+  const { inputs } = buildTransferWitness({
+    keys: sender,
+    v: 1000n,
+    r: 0n,
+    amount: 250n,
+    pvkB: recipient.PVK,
+    kAudR: auditorKey(),
+    kAudS: auditorKey(),
+  });
+  await transferNoir.execute({ ...inputs, r_tilde_aud_s: "0xbeef" });
 });
 
 console.log(`\nparity: ${pass} passed, ${fail} failed`);

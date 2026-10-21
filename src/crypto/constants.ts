@@ -155,14 +155,18 @@ export const DOMAIN = {
   ESCROWED_ALLOWANCE_BLINDING_AUDITOR: 17n,
 } as const;
 
-/** Verifier circuit-type discriminants (verifier/mod.rs `CircuitType`). */
+/**
+ * Verifier circuit-type discriminants (verifier/mod.rs `CircuitType`). Core
+ * token circuits occupy 0..=4; circuits shipped by optional extensions start
+ * at 100. There is no revoke_spender circuit: revocation is a proofless fold.
+ */
 export const CIRCUIT_TYPE = {
   Register: 0,
   Withdraw: 1,
   Transfer: 2,
   SpenderTransfer: 3,
   SetSpender: 4,
-  RevokeSpender: 5,
+  Clawback: 100,
 } as const;
 
 export type CircuitTypeName = keyof typeof CIRCUIT_TYPE;

@@ -8,6 +8,7 @@ import { H, scalarMul, ecdh } from "../src/crypto/grumpkin.ts";
 import { DOMAIN } from "../src/crypto/constants.ts";
 import { deriveEphemeralRE, decryptWithDomain } from "../src/crypto/poseidon2.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
+import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
 import { buildDiscloseSenderWitness } from "../src/witness/disclose-sender.ts";
 import { auditTransfer, auditorPublicKey } from "../src/auditor/decrypt.ts";
 
@@ -67,6 +68,16 @@ const twRand = buildTransferWitness({
 });
 ok(twRand.rEScalar === 31337n, "explicit p.rE override respected");
 ok(scalarMul(31337n, H).equals(twRand.payload.rE), "override R_e consistent");
+
+// Withdraw derives r_e the same way (keys-and-commitments.md#ecdh-derived-blinding:
+// "Transfer, Withdraw, and SetSpender from the owner's viewing key").
+const ww = buildWithdrawWitness({ keys: sender, v, r, amount: 400n, kAudS: kAud });
+ok(
+  scalarMul(deriveEphemeralRE(sender.vk, ww.payload.sigma), H).equals(ww.payload.rE),
+  "withdraw default R_e == Poseidon2(EPHEMERAL_KEY, vk, sigma) · H",
+);
+const wwRand = buildWithdrawWitness({ keys: sender, v, r, amount: 400n, kAudS: kAud, rE: 31337n });
+ok(scalarMul(31337n, H).equals(wwRand.payload.rE), "withdraw explicit p.rE override respected");
 
 console.log(`\nephemeral: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

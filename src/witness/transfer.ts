@@ -3,10 +3,10 @@
  * spendable balance into the recipient's receiving balance, and emits dual
  * auditor channels (recipient + sender).
  *
- * Public-input order (matches `storage.rs::confidential_transfer`):
+ * Public-input order (25 fields, matches `storage.rs::confidential_transfer`):
  *   C_spend_A, Y_A, PVK_B, addr_f, K_aud_r, K_aud_s, C_spend', C_transfer,
  *   R_e, v_tilde, b_tilde, sigma, v_tilde_aud_r, r_tilde_aud_r, v_tilde_aud_s,
- *   b_tilde_aud_s
+ *   b_tilde_aud_s, r_tilde_aud_s
  */
 
 import type { KeyPair } from "../crypto/keys.js";
@@ -20,6 +20,7 @@ import {
   encryptAmount,
   encryptBalance,
   spongeSqueeze2,
+  spongeSqueeze3,
 } from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
@@ -55,6 +56,7 @@ export interface TransferWitness {
     rAudR: bigint;
     vAudS: bigint;
     bAudS: bigint;
+    rAudS: bigint;
   };
   /** Post-op sender spendable opening, for the local state engine. */
   next: { v: bigint; r: bigint; cSpend: Point };
@@ -100,17 +102,19 @@ export function buildTransferWitness(p: TransferParams): TransferWitness {
   const cTransfer = commit(amount, rTransfer);
   const vTilde = encryptAmount(amount, sX, sigma);
 
-  // Recipient-auditor channel (amount mask, then r_transfer mask).
+  // Recipient-auditor channel, two-wide (amount mask, then r_transfer mask).
   const sArX = ecdh(rE, kAudR);
   const mR = spongeSqueeze2(DOMAIN.AUDITOR_RECIPIENT, sArX, sigma);
   const vAudR = frAdd(amount, mR[0]);
   const rAudR = frAdd(rTransfer, mR[1]);
 
-  // Sender-auditor channel (amount mask, then balance-checkpoint mask).
+  // Sender-auditor channel, three-wide (T_a6): amount mask, balance-checkpoint
+  // mask, then the escrow of the new spendable blinding r_A' (T_a9).
   const sAsX = ecdh(rE, kAudS);
-  const mS = spongeSqueeze2(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
+  const mS = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
   const vAudS = frAdd(amount, mS[0]);
   const bAudS = frAdd(vNew, mS[1]);
+  const rAudS = frAdd(rNew, mS[2]);
 
   const inputs: NoirInputs = {
     sk: fieldIn(keys.sk),
@@ -134,11 +138,24 @@ export function buildTransferWitness(p: TransferParams): TransferWitness {
     r_tilde_aud_r: fieldIn(rAudR),
     v_tilde_aud_s: fieldIn(vAudS),
     b_tilde_aud_s: fieldIn(bAudS),
+    r_tilde_aud_s: fieldIn(rAudS),
   };
 
   return {
     inputs,
-    payload: { cSpendNew, cTransfer, rE: rePoint, vTilde, bTilde, sigma, vAudR, rAudR, vAudS, bAudS },
+    payload: {
+      cSpendNew,
+      cTransfer,
+      rE: rePoint,
+      vTilde,
+      bTilde,
+      sigma,
+      vAudR,
+      rAudR,
+      vAudS,
+      bAudS,
+      rAudS,
+    },
     next: { v: vNew, r: rNew, cSpend: cSpendNew },
     recipientView: { vTransfer: amount, rTransfer, cTransfer },
     rEScalar: rE,

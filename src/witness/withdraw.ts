@@ -1,17 +1,23 @@
 /**
  * Withdraw-circuit witness. Debits `amount` from the spendable
  * balance to the public SEP-41 side, re-blinds the remainder, and emits a
- * sender-auditor balance checkpoint.
+ * sender-auditor balance checkpoint plus an escrow of the new blinding.
  *
- * Public-input order (matches `storage.rs::withdraw`):
- *   C_spend, Y, addr_f, K_aud_s, a, C_spend', sigma, b_tilde, R_e, b_tilde_aud_s
+ * Public-input order (16 fields, matches `storage.rs::withdraw`):
+ *   C_spend, Y, addr_f, K_aud_s, a, C_spend', sigma, b_tilde, R_e,
+ *   b_tilde_aud_s, r_tilde_aud_s
  */
 
 import type { KeyPair } from "../crypto/keys.js";
 import { H, commit, scalarMul, ecdh, type Point } from "../crypto/grumpkin.js";
 import { randomScalar, frAdd } from "../crypto/field.js";
 import { DOMAIN } from "../crypto/constants.js";
-import { deriveSpendR, encryptBalance, spongeSqueeze3 } from "../crypto/poseidon2.js";
+import {
+  deriveEphemeralRE,
+  deriveSpendR,
+  encryptBalance,
+  spongeSqueeze3,
+} from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 export interface WithdrawParams {
@@ -27,7 +33,11 @@ export interface WithdrawParams {
   kAudS: Point;
   /** Optional fixed salt (defaults to a fresh random scalar). */
   sigma?: bigint;
-  /** Optional fixed ephemeral scalar `r_e ≠ 0` (defaults to random). */
+  /**
+   * Optional fixed ephemeral scalar `r_e ≠ 0`. Defaults to the derivation
+   * `Poseidon2(EPHEMERAL_KEY, vk, sigma)` the spec requires of every holder
+   * operation (docs/protocol/keys-and-commitments.md#ecdh-derived-blinding).
+   */
   rE?: bigint;
 }
 
@@ -40,6 +50,7 @@ export interface WithdrawWitness {
     rE: Point;
     sigma: bigint;
     bAudS: bigint;
+    rAudS: bigint;
   };
   /** Post-op spendable opening, for the local state engine. */
   next: { v: bigint; r: bigint; cSpend: Point };
@@ -52,16 +63,25 @@ export function buildWithdrawWitness(p: WithdrawParams): WithdrawWitness {
   if (vNew < 0n) throw new Error("withdraw amount exceeds spendable balance");
 
   const sigma = p.sigma ?? randomScalar();
-  const rE = p.rE ?? randomScalar(); // randomScalar() is always nonzero (T8/W8)
+  // Deterministic (vk + sigma), like transfer: the holder can re-derive r_e
+  // from the emitted event alone. deriveEphemeralRE throws on the
+  // negligible zero output (W8 requires r_e ≠ 0) — resample sigma then.
+  const rE = p.rE ?? deriveEphemeralRE(keys.vk, sigma);
 
   const cSpend = commit(v, r);
   const rNew = deriveSpendR(keys.vk, sigma);
   const cSpendNew = commit(vNew, rNew);
   const bTilde = encryptBalance(vNew, keys.vk, sigma);
   const rePoint = scalarMul(rE, H);
+
+  // Sender-auditor channel, three-wide (W_a3): lane 0 (amount) unused — the
+  // withdrawn amount is public — lane 1 the balance checkpoint (W_a4), lane 2
+  // the escrow of the new blinding r' (W_a5). Both pads add in-circuit, so
+  // mod r (frAdd), not as a blinding accumulation.
   const sAsX = ecdh(rE, kAudS);
   const mS = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
   const bAudS = frAdd(vNew, mS[1]);
+  const rAudS = frAdd(rNew, mS[2]);
 
   const inputs: NoirInputs = {
     sk: fieldIn(keys.sk),
@@ -78,11 +98,12 @@ export function buildWithdrawWitness(p: WithdrawParams): WithdrawWitness {
     b_tilde: fieldIn(bTilde),
     ...pointIn("r_e", rePoint),
     b_tilde_aud_s: fieldIn(bAudS),
+    r_tilde_aud_s: fieldIn(rAudS),
   };
 
   return {
     inputs,
-    payload: { cSpendNew, bTilde, rE: rePoint, sigma, bAudS },
+    payload: { cSpendNew, bTilde, rE: rePoint, sigma, bAudS, rAudS },
     next: { v: vNew, r: rNew, cSpend: cSpendNew },
   };
 }

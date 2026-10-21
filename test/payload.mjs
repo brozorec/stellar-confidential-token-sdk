@@ -8,11 +8,12 @@ import { xdr } from "@stellar/stellar-sdk";
 
 import { deriveKeys } from "../src/crypto/keys.ts";
 import { addressToField } from "../src/crypto/address.ts";
-import { randomScalar } from "../src/crypto/field.ts";
+import { randomScalar, toBytes32BE } from "../src/crypto/field.ts";
 import { pointToBytes } from "../src/crypto/grumpkin.ts";
 import { buildRegisterWitness } from "../src/witness/register.ts";
+import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
-import { encodeRegisterData, encodeTransferData } from "../src/chain/payload.ts";
+import { encodeRegisterData, encodeWithdrawData, encodeTransferData } from "../src/chain/payload.ts";
 
 let pass = 0,
   fail = 0;
@@ -87,17 +88,37 @@ ok(
       "c_transfer",
       "r_e_point",
       "r_tilde_aud_r",
+      "r_tilde_aud_s",
       "sigma",
       "v_tilde",
       "v_tilde_aud_r",
       "v_tilde_aud_s",
     ]),
-  "transfer payload keys sorted (10 fields)",
+  "transfer payload keys sorted (11 fields)",
 );
 const cTransfer = tPayload.map().find((e) => e.key().sym().toString() === "c_transfer").val();
 ok(cTransfer.bytes().length === 64, "c_transfer is 64 bytes");
 const bTilde = tPayload.map().find((e) => e.key().sym().toString() === "b_tilde").val();
 ok(bTilde.bytes().length === 32, "b_tilde is 32 bytes");
+const tRAudS = tPayload.map().find((e) => e.key().sym().toString() === "r_tilde_aud_s").val();
+ok(
+  Buffer.from(toBytes32BE(tw.payload.rAudS)).equals(tRAudS.bytes()),
+  "transfer r_tilde_aud_s bytes == witness value",
+);
+
+console.log("withdraw envelope:");
+const ww = buildWithdrawWitness({ keys, v: 1000n, r: 0n, amount: 400n, kAudS: recipient.PVK });
+const wInner = xdr.ScVal.fromXDR(encodeWithdrawData(ww, proof).bytes());
+const wPayload = wInner.map().find((e) => e.key().sym().toString() === "payload").val();
+ok(
+  JSON.stringify(wPayload.map().map((e) => e.key().sym().toString())) ===
+    JSON.stringify(["b_tilde", "b_tilde_aud_s", "c_spend_new", "r_e_point", "r_tilde_aud_s", "sigma"]),
+  "withdraw payload keys sorted (6 fields)",
+);
+ok(
+  wPayload.map().every((e) => e.key().switch().name === "scvSymbol"),
+  "withdraw payload map keys are Symbols",
+);
 
 console.log(`\npayload: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

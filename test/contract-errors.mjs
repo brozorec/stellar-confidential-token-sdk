@@ -32,6 +32,12 @@ check(
   "policy denial (3602) maps",
   humanizeContractError("HostError: Error(Contract, #3602)") === CONTRACT_ERRORS[3602],
 );
+// v0.8.0 additions: clawback preconditions, the verifier/auditor registries,
+// and the crypto point decoder all surface through the same humanizer.
+for (const code of [1403, 2010, 2203, 3303, 3403, 3604, 3605, 3606]) {
+  check(`${code} maps`, humanizeContractError(`Error(Contract, #${code})`) === CONTRACT_ERRORS[code]);
+}
+check("3604 message mentions frozen", /frozen/i.test(CONTRACT_ERRORS[3604]));
 check(
   "unknown contract code → generic contract message",
   humanizeContractError("Error(Contract, #9999)") === "The contract rejected the operation (error #9999).",

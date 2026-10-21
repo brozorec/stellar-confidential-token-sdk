@@ -87,6 +87,8 @@ export interface WithdrawEvent extends BaseEvent {
   sigma: bigint;
   bTilde: bigint;
   bAudS: bigint;
+  /** Sender-auditor escrow of the new spendable blinding (W_a5). */
+  rAudS: bigint;
 }
 export interface TransferEvent extends BaseEvent {
   type: "transfer";
@@ -100,6 +102,8 @@ export interface TransferEvent extends BaseEvent {
   rAudR: bigint;
   vAudS: bigint;
   bAudS: bigint;
+  /** Sender-auditor escrow of the sender's new spendable blinding (T_a9). */
+  rAudS: bigint;
 }
 
 /** A compliance/policy membership event ({@link ComplianceEventType}). */
@@ -178,6 +182,7 @@ export function buildConfidentialEvent(
         sigma: data.field("sigma"),
         bTilde: data.field("b_tilde"),
         bAudS: data.field("b_tilde_aud_s"),
+        rAudS: data.field("r_tilde_aud_s"),
       };
     case "transfer":
       return {
@@ -193,6 +198,7 @@ export function buildConfidentialEvent(
         rAudR: data.field("r_tilde_aud_r"),
         vAudS: data.field("v_tilde_aud_s"),
         bAudS: data.field("b_tilde_aud_s"),
+        rAudS: data.field("r_tilde_aud_s"),
       };
     case "frozen":
     case "unfrozen":
