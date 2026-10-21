@@ -11,6 +11,16 @@
 //   deposit  : symbol = 'deposit' AND topic[2] is an address AND data LIKE '%amount%'
 //   merge    : symbol = 'merge'   AND topic[1] is an address, topic[2] absent,
 //              AND data has no fields (empty Map)
+//   set_spender      : symbol = 'set_spender' AND topic[2] is an address AND
+//              data LIKE '%live_until_ledger%'
+//   spender_transfer : symbol = 'spender_transfer' AND topic[3] is an address
+//              AND data LIKE '%sigma_a_new%'
+//   revoke_spender   : symbol = 'revoke_spender' AND topic[2] is an address
+//              AND data LIKE '%allowance_salt%'
+//   clawback : symbol = 'clawback' AND topic[1] is an address AND topic[2]
+//              ABSENT AND data LIKE '%amount%' — the SAC's own `clawback`
+//              carries the asset in topic[2] and a bare i128 as data
+//   compliance_config_changed : topic[1] absent AND data LIKE '%sac_passthrough%'
 //   compliance/policy : symbol IN ('frozen','unfrozen','user_allowed',
 //              'user_disallowed','user_blocked','user_unblocked') AND topic[1]
 //              is an address, topic[2] absent, AND data has no fields (same
@@ -63,7 +73,19 @@ const COMPLIANCE = new Set([
   "user_blocked",
   "user_unblocked",
 ]);
-const KNOWN = new Set(["register", "deposit", "merge", "transfer", "withdraw", ...COMPLIANCE]);
+const KNOWN = new Set([
+  "register",
+  "deposit",
+  "merge",
+  "transfer",
+  "withdraw",
+  "set_spender",
+  "spender_transfer",
+  "revoke_spender",
+  "clawback",
+  "compliance_config_changed",
+  ...COMPLIANCE,
+]);
 
 const hasKey = (value, name) => (value?.map ?? []).some((e) => e?.key?.symbol === name);
 const isEmptyMap = (value) => Array.isArray(value?.map) && value.map.length === 0;
@@ -85,6 +107,16 @@ function pipelineKeeps(topic, value) {
       return topicAddr(topic, 2) != null && hasKey(value, "amount");
     case "merge":
       return topicAddr(topic, 1) != null && topicAddr(topic, 2) == null && isEmptyMap(value);
+    case "set_spender":
+      return topicAddr(topic, 2) != null && hasKey(value, "live_until_ledger");
+    case "spender_transfer":
+      return topicAddr(topic, 3) != null && hasKey(value, "sigma_a_new");
+    case "revoke_spender":
+      return topicAddr(topic, 2) != null && hasKey(value, "allowance_salt");
+    case "clawback":
+      return topicAddr(topic, 1) != null && topic?.[2] == null && hasKey(value, "amount");
+    case "compliance_config_changed":
+      return topic?.[1] == null && hasKey(value, "sac_passthrough");
     default:
       // Compliance/policy events: [symbol, account] with no data fields.
       if (COMPLIANCE.has(sym)) {
@@ -148,6 +180,10 @@ for (const [sym, r] of bySymbol) {
     check(`${sym}: shape [deposit, from, to] + 'amount'`, topicAddr(t, 2) != null && hasKey(v, "amount"), `topics=${JSON.stringify(t)?.slice(0, 160)} keys=${keys()}`);
   } else if (sym === "merge") {
     check(`${sym}: shape [merge, account] + empty data`, topicAddr(t, 1) != null && topicAddr(t, 2) == null && isEmptyMap(v), `topics=${JSON.stringify(t)?.slice(0, 160)} value=${JSON.stringify(v)?.slice(0, 120)}`);
+  } else if (sym === "clawback") {
+    check(`${sym}: shape [clawback, account] (no topic[2]) + 'amount'`, topicAddr(t, 1) != null && t?.[2] == null && hasKey(v, "amount"), `topics=${JSON.stringify(t)?.slice(0, 160)} keys=${keys()}`);
+  } else if (sym === "set_spender" || sym === "spender_transfer" || sym === "revoke_spender" || sym === "compliance_config_changed") {
+    check(`${sym}: matches its pipeline branch`, pipelineKeeps(t, v), `topics=${JSON.stringify(t)?.slice(0, 160)} keys=${keys()}`);
   } else if (COMPLIANCE.has(sym)) {
     check(`${sym}: shape [${sym}, account] + empty data`, topicAddr(t, 1) != null && topicAddr(t, 2) == null && isEmptyMap(v), `topics=${JSON.stringify(t)?.slice(0, 160)} value=${JSON.stringify(v)?.slice(0, 120)}`);
   }

@@ -7,28 +7,50 @@
  * the RPC `getEvents` API for the recent tail, plus an optional Goldsky indexer
  * for history older than the RPC's ~7-day retention window.
  *
- * Reconstruction rules (owner = `state.address`):
- *   - register(me)        → mark registered.
- *   - deposit(_, me)      → receiving += (amount, 0)   [deposits carry r = 0].
- *   - transfer(other, me) → ECDH-decrypt (v_transfer, r_transfer); receiving += both.
- *   - merge(me)           → spendable += receiving; receiving = (0, 0).
- *   - withdraw(me, _)     → spendable = open(b_tilde, sigma)  [event encodes v_new].
- *   - transfer(me, _)     → spendable = open(b_tilde, sigma).
+ * Reconstruction rules (owner = `state.address`; docs/protocol/wallet-state.md):
+ *   - register(me)              → mark registered.
+ *   - deposit(_, me)            → receiving += (amount, 0)   [deposits carry r = 0].
+ *   - transfer(other, me)       → ECDH-decrypt (v_transfer, r_transfer); receiving += both.
+ *   - spender_transfer(_, _, me)→ the same, keyed by the new allowance salt σ_a′.
+ *   - merge(me)                 → spendable += receiving; receiving = (0, 0).
+ *   - withdraw(me, _)           → spendable = open(b_tilde, sigma)  [checkpoint].
+ *   - transfer(me, _)           → spendable = open(b_tilde, sigma)  [checkpoint].
+ *   - set_spender(me, _)        → spendable = open(b_tilde, sigma)  [checkpoint].
+ *   - revoke_spender(me, sp)    → spendable += (v_a, r_a) from (a_tilde, salt) under dvk.
+ *   - clawback(me)              → spendable = spendable + receiving − (amount, 0);
+ *                                 receiving = (0, 0).
+ * Blindings accumulate mod p (the Grumpkin group order) in every fold.
  *
- * Why the spendable rule needs no history: withdraw/transfer emit
- * `b_tilde = v_new + Poseidon2(ENC_BAL, vk, sigma)`, so the owner reads the
- * resulting spendable value straight from the event. The receiving balance,
- * however, is a running sum — every crediting event must be replayed. With
- * RPC alone those openings are only recoverable inside the ~7-day window, so a
- * client must persist state and sync at least once per retention period. A
- * configured indexer lifts this: crediting events stay available for the full
- * history, so a fresh client can reconstruct the receiving balance from scratch.
+ * Checkpoints overwrite the spendable side, so a client that missed events
+ * before the latest one still converges there. Everything else ACCUMULATES:
+ * the receiving balance is a running sum since the last merge/clawback, and
+ * merge, revoke_spender and clawback after the latest checkpoint are folded on
+ * top of it — so every one of those events must be replayed, in order. With
+ * RPC alone they are only recoverable inside the ~7-day window, so a client
+ * must persist state and sync at least once per retention period; a
+ * revoke_spender that ages out is lost permanently (its `a_tilde`/salt survive
+ * nowhere else once the delegation is deleted — docs/sdk/wallet.md#recovery).
+ * A configured indexer lifts this for a fresh client.
+ *
+ * Event application here is NOT idempotent: ordering and deduplication are
+ * discharged by the event source (`hybridFetchEvents` → `dedupeById`), and the
+ * persisted cursor keeps a sync from re-applying what it already applied.
+ * Every sync ends with {@link StateEngine.verifyAgainstChain}, so a missed or
+ * duplicated event surfaces as a {@link StateDivergedError}, not as a
+ * plausible wrong balance.
  */
 
 import { commit, ecdh, type Point } from "../crypto/grumpkin.js";
 import { fpAdd, frMod } from "../crypto/field.js";
 import { DOMAIN } from "../crypto/constants.js";
-import { deriveSpendR, deriveTransferBlind, poseidonWithDomain } from "../crypto/poseidon2.js";
+import { addressToField } from "../crypto/address.js";
+import {
+  deriveAllowR,
+  deriveSpendR,
+  deriveTransferBlind,
+  dvkFromVkOp,
+  poseidonWithDomain,
+} from "../crypto/poseidon2.js";
 import type { KeyPair } from "../crypto/keys.js";
 import type { ChainClient } from "../chain/client.js";
 import { type ConfidentialEvent } from "../chain/events.js";
@@ -58,10 +80,44 @@ export interface StateEngineConfig {
   indexer?: IndexerClient;
 }
 
+/** Result of re-committing the local openings against the on-chain points. */
+export interface ConsistencyReport {
+  ok: boolean;
+  spendableOk: boolean;
+  receivingOk: boolean;
+}
+
+/**
+ * The local openings do not re-commit to the on-chain commitments. Says which
+ * accumulator diverged — they have different causes (spendable: a missed
+ * revoke/clawback/merge after the last checkpoint; receiving: a missed or
+ * aged-out credit) — and carries the (saved) state for inspection. A diverged
+ * spendable opening MUST NOT be proven against: the proof would fail on-chain
+ * with InvalidProof (3506) at best.
+ */
+export class StateDivergedError extends Error {
+  constructor(
+    readonly report: ConsistencyReport,
+    readonly state: AccountState,
+  ) {
+    const which = [!report.spendableOk && "spendable", !report.receivingOk && "receiving"]
+      .filter(Boolean)
+      .join(" and ");
+    super(
+      `local ${which} opening does not match the on-chain commitment for ${state.address} ` +
+        `(synced to ledger ${state.syncedLedger}) — an event was missed or misapplied`,
+    );
+    this.name = "StateDivergedError";
+  }
+}
+
 export class StateEngine {
   constructor(private cfg: StateEngineConfig) {}
 
-  /** Recover an incoming transfer's amount and blinding from its event. */
+  /**
+   * Recover an incoming transfer's amount and blinding from its event. For a
+   * `spender_transfer`, pass the event's `sigmaANew` as `sigma`.
+   */
   decryptIncoming(
     rE: Point,
     vTilde: bigint,
@@ -78,6 +134,17 @@ export class StateEngine {
     const v = frMod(bTilde - poseidonWithDomain(DOMAIN.ENCRYPTED_BALANCE, [this.cfg.keys.vk, sigma]));
     const r = deriveSpendR(this.cfg.keys.vk, sigma);
     return { v, r };
+  }
+
+  /**
+   * Recover a delegation's allowance opening `(v_a, r_a)` from a
+   * `revoke_spender` event's `(a_tilde, allowance_salt)`, under
+   * `dvk = Poseidon2(DELEGATION_VIEWING_KEY, vk, addr_f(spender))`.
+   */
+  openAllowance(spender: string, aTilde: bigint, allowanceSalt: bigint): Opening {
+    const dvk = dvkFromVkOp(this.cfg.keys.vk, addressToField(spender));
+    const v = frMod(aTilde - poseidonWithDomain(DOMAIN.ENCRYPTED_ALLOWANCE, [dvk, allowanceSalt]));
+    return { v, r: deriveAllowR(dvk, allowanceSalt) };
   }
 
   /** Apply one event in-place to `state`. */
@@ -106,26 +173,53 @@ export class StateEngine {
         if (ev.from === me) state.spendable = this.openSpendable(ev.bTilde, ev.sigma);
         break;
       case "transfer":
-        // Order matters for a self-transfer: the sender's spendable is set from
-        // the event, and the recipient credit is added to receiving.
+        // A self-transfer applies in both roles: the sender side overwrites
+        // spendable, the recipient side credits receiving.
         if (ev.from === me) state.spendable = this.openSpendable(ev.bTilde, ev.sigma);
-        if (ev.to === me) {
-          const { vTransfer, rTransfer } = this.decryptIncoming(ev.rE, ev.vTilde, ev.sigma);
-          state.receiving = {
-            v: state.receiving.v + vTransfer,
-            r: fpAdd(state.receiving.r, rTransfer),
+        if (ev.to === me) this.credit(state, this.decryptIncoming(ev.rE, ev.vTilde, ev.sigma));
+        break;
+      case "set_spender":
+        if (ev.account === me) state.spendable = this.openSpendable(ev.bTilde, ev.sigma);
+        break;
+      case "spender_transfer":
+        // The owner (`from`) is untouched: the value left its C_spend at
+        // set_spender. Pads are keyed by σ_a′, not the consumed salt.
+        if (ev.to === me) this.credit(state, this.decryptIncoming(ev.rE, ev.vTilde, ev.sigmaANew));
+        break;
+      case "revoke_spender":
+        // C_spend += C_a: fold, not a checkpoint.
+        if (ev.account === me) {
+          const a = this.openAllowance(ev.spender, ev.aTilde, ev.allowanceSalt);
+          state.spendable = {
+            v: state.spendable.v + a.v,
+            r: fpAdd(state.spendable.r, a.r),
           };
+        }
+        break;
+      case "clawback":
+        // C_spend' = C_spend + C_receive − amount·G; C_receive' = O
+        // (compliance/storage.rs::clawback): the merge rule, then − amount.
+        if (ev.account === me) {
+          state.spendable = {
+            v: state.spendable.v + state.receiving.v - ev.amount,
+            r: fpAdd(state.spendable.r, state.receiving.r),
+          };
+          state.receiving = { v: 0n, r: 0n };
         }
         break;
     }
     state.syncedLedger = Math.max(state.syncedLedger, ev.ledger);
   }
 
-  /**
-   * Sync from the last cursor (or `fromLedger` on first run), applying every
-   * relevant event, then persist. Returns the updated state.
-   */
-  async sync(): Promise<AccountState> {
+  private credit(state: AccountState, inc: { vTransfer: bigint; rTransfer: bigint }): void {
+    state.receiving = {
+      v: state.receiving.v + inc.vTransfer,
+      r: fpAdd(state.receiving.r, inc.rTransfer),
+    };
+  }
+
+  /** One fetch-apply-persist pass from the stored cursor. */
+  private async syncOnce(): Promise<AccountState> {
     const prior = await this.cfg.store.load(this.cfg.address);
     const state = prior ?? freshState(this.cfg.address);
 
@@ -143,9 +237,50 @@ export class StateEngine {
     return state;
   }
 
+  /**
+   * Sync from the last cursor (or `fromLedger` on first run), applying every
+   * relevant event, persist, then verify the openings against the chain
+   * (docs/sdk/wallet.md#consistency-checking). Returns the updated state.
+   *
+   * The on-chain read happens after the event fetch, so an event landing in
+   * between can produce a spurious mismatch; one re-sync absorbs that before
+   * a mismatch is reported.
+   *
+   * @throws {StateDivergedError} if the openings still do not re-commit to the
+   *   on-chain points. The state is persisted regardless.
+   */
+  async sync(opts: { verify?: boolean } = {}): Promise<AccountState> {
+    let state = await this.syncOnce();
+    if (opts.verify === false) return state;
+    let report = await this.verifyAgainstChain();
+    if (!report.ok) {
+      state = await this.syncOnce();
+      report = await this.verifyAgainstChain();
+    }
+    if (!report.ok) throw new StateDivergedError(report, state);
+    return state;
+  }
+
   /** Read current state without syncing (or a fresh zero-state). */
   async current(): Promise<AccountState> {
     return (await this.cfg.store.load(this.cfg.address)) ?? freshState(this.cfg.address);
+  }
+
+  /**
+   * The spendable opening to build a proof from, verified against the chain
+   * first (docs/sdk/wallet.md#consistency-checking: "before constructing any
+   * proof"). Only the spendable accumulator gates proving — the withdraw and
+   * transfer circuits open `C_spend` alone; a receiving divergence is still
+   * reported on the error if both diverged.
+   *
+   * @throws {StateDivergedError} if the spendable opening does not match
+   *   on-chain `C_spend` — sync again before retrying.
+   */
+  async spendableForProof(): Promise<Opening> {
+    const report = await this.verifyAgainstChain();
+    const state = await this.current();
+    if (!report.spendableOk) throw new StateDivergedError(report, state);
+    return { ...state.spendable };
   }
 
   /**
@@ -163,12 +298,19 @@ export class StateEngine {
   /**
    * Strong correctness check: the cached openings must re-commit to the exact
    * points stored on-chain. Mismatch means the local state diverged (a missed
-   * event, an expired credit, or a bug) and is unsafe to spend from.
+   * event, an expired credit, or a bug) and is unsafe to spend from. An
+   * account with no on-chain record is consistent only with a state that has
+   * never seen its registration and holds zero openings.
    */
-  async verifyAgainstChain(): Promise<{ ok: boolean; spendableOk: boolean; receivingOk: boolean }> {
+  async verifyAgainstChain(): Promise<ConsistencyReport> {
     const state = await this.current();
     const onchain = await this.cfg.client.confidentialBalance(this.cfg.address);
-    if (!onchain) return { ok: false, spendableOk: false, receivingOk: false };
+    if (!onchain) {
+      const isZero = (o: Opening) => o.v === 0n && o.r === 0n;
+      const spendableOk = !state.registered && isZero(state.spendable);
+      const receivingOk = !state.registered && isZero(state.receiving);
+      return { ok: spendableOk && receivingOk, spendableOk, receivingOk };
+    }
     const spendableOk = commit(state.spendable.v, state.spendable.r).equals(onchain.spendableBalance);
     const receivingOk = commit(state.receiving.v, state.receiving.r).equals(onchain.receivingBalance);
     return { ok: spendableOk && receivingOk, spendableOk, receivingOk };

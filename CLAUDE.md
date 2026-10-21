@@ -64,7 +64,7 @@ Spendable secrets (`v`, `r`) live only in events; the chain stores commitments. 
 
 A *configured* indexer's backfill failure must **propagate**, never degrade to RPC-only: a silent degrade persists an RPC cursor that permanently commits the client to the warm, indexer-skipping path and strands pre-window history.
 
-Spendable balance is recoverable from the latest withdraw/transfer event alone (the event carries `b_tilde`); the receiving balance is a running sum, so every crediting event must be replayed — hence local persistence is load-bearing for correctness, not just speed. `StateEngine.verifyAgainstChain()` re-commits local openings against on-chain points.
+Spendable balance restarts from the latest checkpoint (withdraw, outgoing transfer, or `set_spender` — the events carrying `b_tilde`), but merge, `revoke_spender` and `clawback` after it are folds, and the receiving balance is a running sum — so every one of those events must be replayed in order, hence local persistence is load-bearing for correctness, not just speed. `StateEngine.sync()` ends with `verifyAgainstChain()` (re-commit local openings against on-chain points) and throws `StateDivergedError` on mismatch; `spendableForProof()` repeats it before proving.
 
 ## Browser-safety rule for barrels
 

@@ -106,16 +106,22 @@ source:
 - It persists decrypted openings locally and tracks a sync cursor. With the
   RPC alone, local persistence is load-bearing for correctness; with an
   indexer, a fresh client can also rebuild from full history.
-- The spendable balance is recoverable from the most recent withdraw or
-  transfer event alone, so a regular spender is robust within the window.
-- The receiving balance is a running sum: with the RPC only, if an
-  incoming-transfer event ages out before you sync, that credit's opening is
-  unrecoverable — sync at least once per retention period, or configure an
-  indexer.
+- The spendable balance restarts from the latest **checkpoint** — a withdraw,
+  an outgoing transfer, or a `set_spender` — each of which carries `b_tilde`.
+  It is not recoverable from that event alone: every merge, `revoke_spender`
+  and `clawback` after the checkpoint is folded on top of it.
+- The receiving balance is a running sum since the last merge or clawback.
+- With the RPC only, any of those accumulating events that ages out before
+  you sync takes its opening with it — an incoming credit, or a
+  `revoke_spender` whose `a_tilde` and salt survive nowhere else once the
+  delegation is deleted. Sync at least once per retention period, or
+  configure an indexer.
 
-`StateEngine.verifyAgainstChain()` re-commits the local openings and checks
-them against the on-chain commitments, so divergence is detected, never
-silently spent.
+Every `StateEngine.sync()` ends by re-committing the local openings and
+checking them against the on-chain commitments; a mismatch throws a
+`StateDivergedError` that names the diverged accumulator, so divergence is
+detected, never silently spent. `StateEngine.spendableForProof()` repeats the
+check immediately before a proof is built and returns the verified opening.
 
 ## License
 

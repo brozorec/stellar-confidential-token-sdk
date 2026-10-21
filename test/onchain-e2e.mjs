@@ -38,6 +38,8 @@ import {
   ChainClient,
   CircuitProver,
   H,
+  MemoryStore,
+  StateEngine,
   addressToField,
   auditTransfer,
   auditWithdraw,
@@ -281,6 +283,26 @@ try {
   );
   await expectOpenings("alice", ww.next, { v: 0n, r: 0n });
 
+  console.log("\nstate engine (real events → replay → consistency check):");
+  const engineFor = (keys, address) =>
+    new StateEngine({ client, store: new MemoryStore(), keys, address, fromLedger });
+  const aEngine = engineFor(aKeys, A);
+  const bEngine = engineFor(bKeys, B);
+  const aState = await aEngine.sync().catch((e) => e);
+  check("alice: sync verifies against chain", !(aState instanceof Error), aState?.message);
+  check(
+    "alice: replayed spendable == post-withdraw opening",
+    aState?.spendable?.v === ww.next.v && aState?.spendable?.r === ww.next.r,
+  );
+  const bState = await bEngine.sync().catch((e) => e);
+  check("bob: sync verifies against chain", !(bState instanceof Error), bState?.message);
+  check("bob: replayed receiving == the transfer credit", bState?.receiving?.v === SENT);
+  await step("merge bob", () => submitMerge(client, bSigner, B));
+  const bMerged = await bEngine.sync().catch((e) => e);
+  check("bob: merge folded receiving into spendable", bMerged?.spendable?.v === SENT && bMerged?.receiving?.v === 0n);
+  const bOpening = await bEngine.spendableForProof().catch((e) => e);
+  check("bob: spendableForProof returns the verified opening", bOpening?.v === SENT);
+
   console.log("\nevents:");
   const { events } = await fetchEvents(client, { startLedger: fromLedger });
   const evT = events.find((e) => e.type === "transfer");
@@ -293,8 +315,8 @@ try {
   );
   check("withdraw event carries the submitted r_tilde_aud_s", evW?.rAudS === ww.payload.rAudS);
   check(
-    "event types seen: register×2, deposit, merge, transfer, withdraw",
-    ["register", "register", "deposit", "merge", "transfer", "withdraw"].every(
+    "event types seen: register×2, deposit, merge×2, transfer, withdraw",
+    ["register", "register", "deposit", "merge", "merge", "transfer", "withdraw"].every(
       (t, i, all) => events.filter((e) => e.type === t).length === all.filter((x) => x === t).length,
     ),
     events.map((e) => e.type).join(","),

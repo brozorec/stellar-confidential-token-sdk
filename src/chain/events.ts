@@ -1,7 +1,8 @@
 /**
- * Event ingestion over the Soroban RPC `getEvents` API — the ONLY source of
- * the protocol's client-visible secrets (encrypted amounts, salts, balance
- * checkpoints). There is no indexer.
+ * Event ingestion over the Soroban RPC `getEvents` API — the ONLY on-chain
+ * source of the protocol's client-visible secrets (encrypted amounts, salts,
+ * balance checkpoints); the optional Goldsky indexer (`indexer.ts`) mirrors
+ * the same events for history older than the RPC window.
  *
  * ⚠️ Retention: `getEvents` only serves roughly the last 7 days of ledgers.
  * Because spending requires re-deriving `v`/`r` from these events, a client
@@ -10,8 +11,11 @@
  * decrypted state locally and must sync within the retention window. This is
  * the central, deliberate limitation of this design.
  *
- * Events are soroban-sdk 27 `#[contractevent]` Map-format: `#[topic]` fields
+ * Events are soroban-sdk 28 `#[contractevent]` Map-format: `#[topic]` fields
  * become topics (after the event-name symbol), the rest become a data `ScMap`.
+ * An `Option` field that is `None` is left OUT of the map entirely (not
+ * written as `Void`), so optional fields go through
+ * {@link EventDataAccessor.isNone}, which accepts both.
  * The data keys below are the contract's struct field names verbatim — verify them
  * against `stellar contract info interface --wasm …` after any dependency bump,
  * since a renamed field surfaces only as a runtime "missing field" throw.
@@ -29,17 +33,24 @@ export type ConfidentialEventType =
   | "merge"
   | "withdraw"
   | "transfer"
+  | "set_spender"
+  | "spender_transfer"
+  | "revoke_spender"
+  | "clawback"
+  | "compliance_config_changed"
   | ComplianceEventType;
 
 /**
  * Compliance + policy membership events. They share one shape — topics
- * `[symbol, account]` with NO data fields — and are emitted by the
- * `token_with_compliance` contract (`frozen`/`unfrozen`) and the standalone
- * allowlist/blocklist policy contracts (`user_*`). Note the on-chain symbol is
- * the snake_case of the soroban `#[contractevent]` struct name, so the
- * allowlist's `UserAllowed` struct emits `user_allowed` (NOT `allow`, despite
- * what the library docstrings say). They do not affect balance openings, so the
- * StateEngine ignores them; the token-admin dashboard replays them.
+ * `[symbol, account]` with NO data fields — and are emitted by a compliant
+ * token (`frozen`/`unfrozen`, stellar_confidential::compliance) and by policy
+ * contracts (`user_*`: the upstream allowlist-policy example emits
+ * `user_allowed`/`user_disallowed`; `user_blocked`/`user_unblocked` come from a
+ * blocklist-style policy). Note the on-chain symbol is the snake_case of the
+ * soroban `#[contractevent]` struct name, so the allowlist's `UserAllowed`
+ * struct emits `user_allowed` (NOT `allow`). They do not affect balance
+ * openings, so the StateEngine ignores them; the token-admin dashboard replays
+ * them.
  */
 export type ComplianceEventType =
   | "frozen"
@@ -106,6 +117,83 @@ export interface TransferEvent extends BaseEvent {
   rAudS: bigint;
 }
 
+/**
+ * `set_spender`: the owner escrows part of its spendable balance into a
+ * delegation. A spendable CHECKPOINT, like withdraw: `(b_tilde, sigma)` opens
+ * the owner's new `C_spend`.
+ */
+export interface SetSpenderEvent extends BaseEvent {
+  type: "set_spender";
+  account: string;
+  spender: string;
+  liveUntilLedger: number;
+  rE: Point;
+  sigma: bigint;
+  bTilde: bigint;
+  vAudS: bigint;
+  bAudS: bigint;
+  rAudS: bigint;
+  /** Owner-auditor escrow of the allowance blinding (S14). */
+  raAudS: bigint;
+}
+
+/**
+ * `spender_transfer` (`confidential_transfer_from`): a spender moves part of
+ * an allowance to `to`. The owner's balances are untouched (the value left at
+ * `set_spender`); the recipient credits receiving exactly as for a transfer,
+ * but every pad is keyed by the NEW allowance salt `sigma_a_new` (σ_a′).
+ */
+export interface SpenderTransferEvent extends BaseEvent {
+  type: "spender_transfer";
+  spender: string;
+  from: string;
+  to: string;
+  rE: Point;
+  vTilde: bigint;
+  sigmaANew: bigint;
+  vAudR: bigint;
+  rAudR: bigint;
+  vAudS: bigint;
+  aAudS: bigint;
+  rAudS: bigint;
+}
+
+/**
+ * `revoke_spender` — owner `revoke_spender` or compliance
+ * `force_revoke_spender`: the delegation's remaining allowance commitment is
+ * added back to the owner's `C_spend`. NOT a checkpoint (no `b_tilde`): the
+ * owner folds `(v_a, r_a)`, recovered from `(a_tilde, allowance_salt)` under
+ * `dvk = Poseidon2(DELEGATION_VIEWING_KEY, vk, addr_f(spender))`.
+ */
+export interface RevokeSpenderEvent extends BaseEvent {
+  type: "revoke_spender";
+  account: string;
+  spender: string;
+  aTilde: bigint;
+  allowanceSalt: bigint;
+}
+
+/**
+ * `clawback` (compliance extension): `C_spend' = C_spend + C_receive − amount·G`,
+ * `C_receive' = O`. Not a checkpoint; a receiving-side reset. Topics are
+ * `[clawback, account]` — the SAC's own `clawback` also carries the asset in
+ * topic[2], but it is a different contract id.
+ */
+export interface ClawbackEvent extends BaseEvent {
+  type: "clawback";
+  account: string;
+  amount: bigint;
+  /** Recipient of the seized underlying, or `null` (left in the pool). */
+  destination: string | null;
+}
+
+/** `compliance_config_changed`: no topics beyond the name; no balance effect. */
+export interface ComplianceConfigChangedEvent extends BaseEvent {
+  type: "compliance_config_changed";
+  policy: string | null;
+  sacPassthrough: boolean;
+}
+
 /** A compliance/policy membership event ({@link ComplianceEventType}). */
 export interface ComplianceEvent extends BaseEvent {
   type: ComplianceEventType;
@@ -119,6 +207,11 @@ export type ConfidentialEvent =
   | MergeEvent
   | WithdrawEvent
   | TransferEvent
+  | SetSpenderEvent
+  | SpenderTransferEvent
+  | RevokeSpenderEvent
+  | ClawbackEvent
+  | ComplianceConfigChangedEvent
   | ComplianceEvent;
 
 /** The event-name symbols this client understands (topic[0]). Shared by the
@@ -129,6 +222,11 @@ export const KNOWN: ReadonlySet<string> = new Set([
   "merge",
   "withdraw",
   "transfer",
+  "set_spender",
+  "spender_transfer",
+  "revoke_spender",
+  "clawback",
+  "compliance_config_changed",
   "frozen",
   "unfrozen",
   "user_allowed",
@@ -148,6 +246,14 @@ export interface EventDataAccessor {
   point(name: string): Point;
   i128(name: string): bigint;
   u32(name: string): number;
+  bool(name: string): boolean;
+  address(name: string): string;
+  /**
+   * True when an `Option` field is `None`: absent from the map (what
+   * soroban-sdk 28 emits) or present as `Void`. Every other getter throws on
+   * an absent field — only fields declared `Option` may be read through this.
+   */
+  isNone(name: string): boolean;
 }
 
 /**
@@ -199,6 +305,62 @@ export function buildConfidentialEvent(
         vAudS: data.field("v_tilde_aud_s"),
         bAudS: data.field("b_tilde_aud_s"),
         rAudS: data.field("r_tilde_aud_s"),
+      };
+    case "set_spender":
+      return {
+        ...base,
+        type: "set_spender",
+        account: addr(1),
+        spender: addr(2),
+        liveUntilLedger: data.u32("live_until_ledger"),
+        rE: data.point("r_e_point"),
+        sigma: data.field("sigma"),
+        bTilde: data.field("b_tilde"),
+        vAudS: data.field("v_tilde_aud_s"),
+        bAudS: data.field("b_tilde_aud_s"),
+        rAudS: data.field("r_tilde_aud_s"),
+        raAudS: data.field("r_a_tilde_aud_s"),
+      };
+    case "spender_transfer":
+      return {
+        ...base,
+        type: "spender_transfer",
+        spender: addr(1),
+        from: addr(2),
+        to: addr(3),
+        rE: data.point("r_e_point"),
+        vTilde: data.field("v_tilde"),
+        sigmaANew: data.field("sigma_a_new"),
+        vAudR: data.field("v_tilde_aud_r"),
+        rAudR: data.field("r_tilde_aud_r"),
+        vAudS: data.field("v_tilde_aud_s"),
+        aAudS: data.field("a_tilde_aud_s"),
+        rAudS: data.field("r_tilde_aud_s"),
+      };
+    case "revoke_spender":
+      return {
+        ...base,
+        type: "revoke_spender",
+        account: addr(1),
+        spender: addr(2),
+        aTilde: data.field("a_tilde"),
+        allowanceSalt: data.field("allowance_salt"),
+      };
+    case "clawback":
+      return {
+        ...base,
+        type: "clawback",
+        account: addr(1),
+        amount: data.i128("amount"),
+        destination: data.isNone("destination") ? null : data.address("destination"),
+      };
+    case "compliance_config_changed":
+      // No account topic: must not go through the addr(1) branch below.
+      return {
+        ...base,
+        type: "compliance_config_changed",
+        policy: data.isNone("policy") ? null : data.address("policy"),
+        sacPassthrough: data.bool("sac_passthrough"),
       };
     case "frozen":
     case "unfrozen":
@@ -264,8 +426,8 @@ function rpcEventCoords(id: string): { opIndex: number; eventIndex: number } {
 
 /**
  * Fetch and parse all confidential-token events from `startLedger` (or resume
- * from `startCursor`), following pagination to the end. Unknown event types
- * (config setters, spender ops) are skipped.
+ * from `startCursor`), following pagination to the end. Event names outside
+ * {@link KNOWN} (registry/config setters) are skipped.
  */
 export async function fetchEvents(
   client: ChainClient,
@@ -414,5 +576,11 @@ function dataMap(value: xdr.ScVal): EventDataAccessor {
     point: (name) => pointFromBytes(new Uint8Array(get(name).bytes())),
     i128: (name) => scValToNative(get(name)) as bigint,
     u32: (name) => get(name).u32(),
+    bool: (name) => get(name).b(),
+    address: (name) => Address.fromScVal(get(name)).toString(),
+    isNone: (name) => {
+      const v = byName.get(name);
+      return v === undefined || v.switch().name === "scvVoid";
+    },
   };
 }
