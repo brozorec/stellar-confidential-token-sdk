@@ -137,8 +137,10 @@ export const DOMAIN = {
   DISCLOSURE_BIND: 15n,
   /**
    * Off-chain selective-disclosure ciphertext to a disclosure recipient:
-   * `v_tilde_disc = v_transfer + Poseidon2(DISCLOSURE, S_disc.x, nu)`
-   * (`delta_disc`). Source of truth: the disclosure circuits.
+   * `v_tilde_disc = v_transfer + Poseidon2(DISCLOSURE, s_disc, nu)` with
+   * `s_disc = ecdh(r_disc, P_R)` (`delta_disc`). Value fixed by
+   * docs/protocol/domain-separators.md; absorbed by
+   * `circuits/disclosure/noir/*` (`DISCLOSURE`).
    *
    * 16 rather than 13: the circuit library uses 13 for {@link DOMAIN.ECDH_SHARED_SECRET},
    * and the disclosure circuits call `ecdh()` themselves — a shared tag would put

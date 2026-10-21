@@ -7,7 +7,7 @@
  * `v_tx`. The amount is decrypted in-witness from the event ciphertext —
  * disclosing requires nothing beyond the wallet keys and the event itself.
  *
- * Public-input order (matches `disclose_recipient/src/main.nr`):
+ * Public-input order (matches `circuits/disclosure/noir/disclose_recipient/src/main.nr`):
  *   addr_f, PVK_A, R_e, sigma, v_tilde, P_R, nu, R_disc, v_tilde_disc
  */
 

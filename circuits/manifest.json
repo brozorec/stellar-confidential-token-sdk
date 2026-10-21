@@ -13,7 +13,7 @@
   "notes": [
     "<name>.json is `nargo compile --package circuit_<name>` output with file_map source paths made repo-relative (debug-only field; bytecode and abi untouched).",
     "vks/<name>.vk.bin is copied verbatim from upstream vks/ and was reproduced byte-for-byte by upstream scripts/build_vk_bins.sh.",
-    "circuits/disclosure/ is not from stellar-contracts and is not covered here."
+    "circuits/disclosure/*.json are built from this repository's circuits/disclosure/noir/ by scripts/build-disclosure.mjs, which also writes the `disclosure` section below; `sha256` covers the upstream-sourced files only."
   ],
   "sha256": {
     "register.json": "3e752a84cebd6c65e4a05e73a93faf1ee3d2f6b88eca87feb60f1aabf1b6e581",
@@ -26,5 +26,15 @@
     "vks/set_spender.vk.bin": "8e5fc7db817e6ba1a536f9b1f98bc75e64ce14e35f636d7f05ca22ed7a8fd656",
     "vks/spender_transfer.vk.bin": "c979e925ba265e207dd0de919dc29577e270bf7f75340a487e0d1b6396394ddc",
     "vks/clawback.vk.bin": "665eb9cf680c89228084647b0d601183f44678c259ed400bd08226024310560b"
+  },
+  "disclosure": {
+    "source": "circuits/disclosure/noir (this repository); circuit library from `source` above",
+    "proof": "UltraHonk, keccak transcript, ZK flavour (verified off-chain by bb.js)",
+    "sha256": {
+      "disclosure/disclose_recipient.json": "0ec99e292721c5e6e552f4c571ded274a89acb1b67e4c0d589499b326c415a18",
+      "disclosure/disclose_recipient.vk.json": "29de28233e88bf1a405a816580b58c052147447d8f4943288819bb7200d3d410",
+      "disclosure/disclose_sender.json": "22b69526348a5e9bc21e2ff8941d179d79f8bd880acf7cf1be84687067c44eb1",
+      "disclosure/disclose_sender.vk.json": "388190c49d458af0c86f857e4d7390690f431c6ec28de262a82165c8e4e991b9"
+    }
   }
 }

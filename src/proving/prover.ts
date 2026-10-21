@@ -4,7 +4,9 @@
  * Keccak transcript is MANDATORY: the on-chain `ultrahonk-soroban-verifier`
  * (NethermindEth/rs-soroban-ultrahonk) uses a keccak256 Fiat-Shamir transcript,
  * so every proof must be generated and verified with `{ keccak: true }`. A
- * Poseidon-transcript proof (the bb.js default) silently fails on-chain.
+ * Poseidon-transcript proof (the bb.js default) silently fails on-chain. The
+ * off-chain disclosure circuits use the same transcript in the ZK flavour
+ * (`{ zk: true }`, see {@link CircuitProverOptions}).
  *
  * The contract reconstructs the public inputs from the submitted payload plus
  * on-chain state, so only the `proof` bytes travel on the wire; `publicInputs`
@@ -27,6 +29,25 @@ import type { NoirInputs } from "../witness/common.js";
 
 /** Must match the on-chain verifier's transcript. */
 const KECCAK = { keccak: true } as const;
+
+/**
+ * Off-chain selective-disclosure proofs: the same keccak transcript, in the ZK
+ * flavour. The on-chain verifier implements only the non-ZK flavour, which is
+ * why the core circuits cannot use it; disclosure proofs are verified by bb.js
+ * and handed to a third party that may archive them, while their witness holds
+ * `sk`. The VK is byte-identical across the two flavours, so a VK pin cannot
+ * tell them apart — a proof checked under the other flavour just fails.
+ */
+const KECCAK_ZK = { keccakZK: true } as const;
+
+export interface CircuitProverOptions {
+  /**
+   * Prove and verify in the ZK flavour. Required for the disclosure circuits
+   * (`circuits/disclosure/*.vk.json` records `"zk": true`); MUST stay off for
+   * every circuit the on-chain verifier checks.
+   */
+  zk?: boolean;
+}
 
 type UltraHonkBackendCtor = new (
   bytecode: string,
@@ -61,11 +82,16 @@ export interface ProofResult {
 export class CircuitProver {
   readonly #noir: Noir;
   readonly #bytecode: string;
+  readonly #flavour: typeof KECCAK | typeof KECCAK_ZK;
   #backend?: UltraHonkBackend;
+  /** Whether this prover uses the ZK flavour ({@link CircuitProverOptions.zk}). */
+  readonly zk: boolean;
 
-  constructor(circuit: CompiledCircuit) {
+  constructor(circuit: CompiledCircuit, options: CircuitProverOptions = {}) {
     this.#noir = new Noir(circuit);
     this.#bytecode = circuit.bytecode;
+    this.zk = options.zk === true;
+    this.#flavour = this.zk ? KECCAK_ZK : KECCAK;
   }
 
   async #backendInstance(): Promise<UltraHonkBackend> {
@@ -80,14 +106,17 @@ export class CircuitProver {
   async prove(inputs: NoirInputs): Promise<ProofResult> {
     const { witness } = await this.#noir.execute(inputs);
     const backend = await this.#backendInstance();
-    const { proof, publicInputs } = await backend.generateProof(witness, KECCAK);
+    const { proof, publicInputs } = await backend.generateProof(witness, this.#flavour);
     return { proof, publicInputs };
   }
 
-  /** Locally verify a proof (sanity check; the chain is the real authority). */
+  /**
+   * Verify a proof locally. For on-chain circuits this is a sanity check (the
+   * chain is the real authority); for disclosure circuits it is the verdict.
+   */
   async verify(result: ProofResult): Promise<boolean> {
     const backend = await this.#backendInstance();
-    return backend.verifyProof(result, KECCAK);
+    return backend.verifyProof(result, this.#flavour);
   }
 
   /**
@@ -98,7 +127,7 @@ export class CircuitProver {
    */
   async verificationKey(): Promise<Uint8Array> {
     const backend = await this.#backendInstance();
-    return backend.getVerificationKey(KECCAK);
+    return backend.getVerificationKey(this.#flavour);
   }
 
   async destroy(): Promise<void> {
@@ -113,6 +142,7 @@ export class CircuitProver {
  */
 export function proverFromArtifact(
   artifact: { bytecode: string } & Record<string, unknown>,
+  options?: CircuitProverOptions,
 ): CircuitProver {
-  return new CircuitProver(artifact as unknown as CompiledCircuit);
+  return new CircuitProver(artifact as unknown as CompiledCircuit, options);
 }

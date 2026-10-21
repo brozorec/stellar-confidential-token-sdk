@@ -11,13 +11,16 @@ pnpm typecheck          # tsc --noEmit
 pnpm test:fast          # everything except UltraHonk proof generation (seconds)
 pnpm test               # test:fast + prove.mjs + disclosure.mjs (slow, needs the bb.js CRS)
 pnpm exec tsx test/<name>.mjs   # run one test
+pnpm exec tsx scripts/build-disclosure.mjs [--check]   # rebuild/verify disclosure artifacts (nargo 1.0.0-beta.11)
+scripts/check-witness-lookups.sh                       # no witness-dependent lookups in any shipped circuit
+(cd circuits/disclosure/noir && nargo test --workspace)
 ```
 
 There is no linter and no test framework. Tests are plain `.mjs` scripts run under `tsx`; each keeps its own `pass`/`fail` counters and ends with `process.exit(fail === 0 ? 0 : 1)`. They import **`../src/*.ts` directly**, so `pnpm build` is not a prerequisite for running them.
 
 `pnpm test` / `pnpm test:fast` are hand-maintained `&&` chains in `package.json` — a new test file runs in CI only once it is added to those chains.
 
-Env-gated tests (`indexer-parity.mjs`, `shape-filter.mjs`) skip cleanly with exit 0 unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set; `CTD_RPC_URL` and `CTD_FROM_LEDGER` are optional overrides. `onchain-e2e.mjs` (in `pnpm test` only) skips unless `CTD_E2E_RPC_URL` and `CTD_E2E_WASM_DIR` are set; it deploys the upstream `examples/confidential` wasms to a friendbot network (its header has the quickstart recipe) and is the only test where the Rust verifier judges SDK proofs. CI (`.github/workflows/ci.yml`) runs `test:fast` on every PR, the two proving tests on main pushes only, and the upstream fixture drift check as its own job.
+Env-gated tests (`indexer-parity.mjs`, `shape-filter.mjs`) skip cleanly with exit 0 unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set; `CTD_RPC_URL` and `CTD_FROM_LEDGER` are optional overrides. `onchain-e2e.mjs` (in `pnpm test` only) skips unless `CTD_E2E_RPC_URL` and `CTD_E2E_WASM_DIR` are set; it deploys the upstream `examples/confidential` wasms to a friendbot network (its header has the quickstart recipe) and is the only test where the Rust verifier judges SDK proofs. CI (`.github/workflows/ci.yml`) runs `test:fast` on every PR, the two proving tests on main pushes only, and as their own jobs the upstream fixture drift check and `disclosure-circuits` (Noir tests, `build-disclosure.mjs --check`, lookup check).
 
 ## What this package is
 
@@ -42,7 +45,7 @@ Data flows `crypto → witness → proving → chain`, with `state`, `auditor`, 
 
 ## Invariants that must not drift
 
-**Keccak transcript is mandatory.** Every proof is generated and verified with `{ keccak: true }` (`KECCAK` in `proving/prover.ts`) because the on-chain verifier uses keccak256 Fiat–Shamir. A default-transcript proof verifies locally and fails on-chain.
+**Keccak transcript is mandatory.** Every proof is generated and verified with a keccak transcript because the on-chain verifier uses keccak256 Fiat–Shamir; a default-transcript proof verifies locally and fails on-chain. On-chain circuits use the non-ZK flavour (`KECCAK` in `proving/prover.ts`), the only one the verifier implements. The disclosure circuits use the ZK flavour (`KECCAK_ZK`, `new CircuitProver(artifact, { zk: true })`): their proofs go to a third party and are verified by bb.js. The VK bytes are identical across flavours, so nothing but `prover.zk` checks in `disclosure/` catches a mix-up — a wrong-flavour proof just fails to verify.
 
 **Domain tags are the wire format.** `DOMAIN` in `crypto/constants.ts` is exactly `1n..17n`, distinct, one sponge mode each (11 is squeezed three-wide, 12 two-wide). Tags 1–13 and 17 are absorbed on-chain or in-circuit; 14–16 are absorbed nowhere, so drift there breaks *cross-client* reads silently — nothing fails. `test/smoke.mjs` pins all seventeen; treat that test as the spec.
 
@@ -54,7 +57,7 @@ Data flows `crypto → witness → proving → chain`, with `state`, `auditor`, 
 
 **One event shape, two decoders.** `buildConfidentialEvent` is the single shape definition; the RPC (XDR) and indexer (Goldsky JSON) paths only supply different `addr`/`EventDataAccessor` adapters. `test/indexer-parity.mjs` pins that the two decode byte-identically.
 
-**Disclosure trust boundary** (`disclosure/verify.ts`): the only values taken from a bundle are `(R_disc, v_tilde_disc)` plus the event *reference*. Event fields, PVKs, and `addr_f` are re-resolved from chain state; `(P_R, nu)` come from the verifier's own request record. Widening what the bundle contributes voids the proof's meaning. The VK derived from the loaded circuit bytecode is also compared byte-for-byte against the pinned `circuits/disclosure/*.vk.json`.
+**Disclosure trust boundary** (`disclosure/verify.ts`): the only values taken from a bundle are `(R_disc, v_tilde_disc)` plus the event *reference*. Event fields, PVKs, and `addr_f` are re-resolved from chain state; `(P_R, nu)` come from the verifier's own request record. Widening what the bundle contributes voids the proof's meaning. The VK derived from the loaded circuit bytecode is also compared byte-for-byte against the pinned `circuits/disclosure/*.vk.json` (`pinnedVk` is mandatory). D-sender re-derives `r_e` from `(vk, sigma)` and reports an event it does not reproduce as `{ disclosable: false }` (`NotDisclosableError` from the builder), never as a proving error.
 
 ## Event retention — the design's central constraint
 
@@ -77,9 +80,9 @@ In the browser, import circuit JSON through the bundler and pass it to `proverFr
 
 ## Circuit artifacts
 
-`circuits/*.json` (register/withdraw/transfer/clawback, compiled from stellar-contracts `v0.8.0`), `circuits/disclosure/*.json` + pinned `*.vk.json` (not from upstream), and `circuits/vks/*.vk.bin` (the VKs registered with the on-chain verifier, including set_spender/spender_transfer; not read by SDK code, shipped for deployment tooling). `circuits/manifest.json` records the upstream tag/commit, toolchain and a sha256 per upstream file; `test/artifacts.mjs` fails on any unrecorded or changed file, and `test/prove.mjs` checks each bb.js-derived VK equals its `.vk.bin`.
+`circuits/*.json` (register/withdraw/transfer/clawback, compiled from stellar-contracts `v0.8.0`), `circuits/disclosure/*.json` + pinned `*.vk.json` (built here from `circuits/disclosure/noir/`, which depends on upstream's circuit library by git tag — upstream ships only the disclosure spec), and `circuits/vks/*.vk.bin` (the VKs registered with the on-chain verifier, including set_spender/spender_transfer; not read by SDK code, shipped for deployment tooling). `circuits/manifest.json` records the upstream tag/commit, toolchain and a sha256 per upstream file; `test/artifacts.mjs` fails on any unrecorded or changed file, and `test/prove.mjs` checks each bb.js-derived VK equals its `.vk.bin`.
 
-Artifacts and code version together — a proof only verifies against a verifier contract whose registered VKs came from these exact circuits. For disclosure, prover and receiver must load *identical* files. All committed artifacts are compiled with nargo `1.0.0-beta.11`, while `@noir-lang/noir_js` is pinned at `1.0.0-beta.9`.
+Artifacts and code version together — a proof only verifies against a verifier contract whose registered VKs came from these exact circuits. For disclosure, prover and receiver must load *identical* files: after editing `circuits/disclosure/noir/` run `pnpm exec tsx scripts/build-disclosure.mjs` (rewrites the artifacts, VK pins and `manifest.json` `disclosure`), and CI's `--check` run fails on any drift. Every circuit must pass `scripts/check-witness-lookups.sh`: without ZK, a `multi_scalar_mul` over the constant `G`/`H` lowers to bb's fixed-base lookup tables and the proof commits which rows the secret scalars hit — the library's `scalar_mul`/`commit` pass the generators as witnesses for this reason, so never call `multi_scalar_mul` on them directly. All committed artifacts are compiled with nargo `1.0.0-beta.11`, while `@noir-lang/noir_js` is pinned at `1.0.0-beta.9`.
 
 ## TypeScript notes
 

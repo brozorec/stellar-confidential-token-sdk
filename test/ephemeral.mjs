@@ -9,7 +9,12 @@ import { DOMAIN } from "../src/crypto/constants.ts";
 import { deriveEphemeralRE, decryptWithDomain } from "../src/crypto/poseidon2.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
 import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
-import { buildDiscloseSenderWitness } from "../src/witness/disclose-sender.ts";
+import {
+  buildDiscloseSenderWitness,
+  senderEphemeralScalar,
+  NotDisclosableError,
+} from "../src/witness/disclose-sender.ts";
+import { proveSenderDisclosure } from "../src/disclosure/prove.ts";
 import { auditTransfer, auditorPublicKey } from "../src/auditor/decrypt.ts";
 
 let pass = 0, fail = 0;
@@ -35,16 +40,18 @@ ok(tw.rEScalar !== 0n, "derived r_e nonzero (T8)");
 const recovered = deriveEphemeralRE(sender.vk, tw.payload.sigma);
 ok(scalarMul(recovered, H).equals(tw.payload.rE), "recovered scalar reproduces the event's R_e");
 
-// D-sender witness builds from the RECOVERED scalar — no retention involved.
+// D-sender witness re-derives the scalar itself — no retention involved.
+const event = { rE: tw.payload.rE, sigma: tw.payload.sigma, vTilde: tw.payload.vTilde };
+ok(senderEphemeralScalar(sender, event) === recovered, "disclosability check returns the derived r_e");
 const ds = buildDiscloseSenderWitness({
   keys: sender,
-  rEScalar: recovered,
-  event: { rE: tw.payload.rE, sigma: tw.payload.sigma, vTilde: tw.payload.vTilde },
+  event,
   pvkB: recipient.PVK,
   pR: scalarMul(99n, H),
   nu: 0xabcn,
 });
 ok(ds.vTx === amount, "D-sender from re-derived r_e discloses the right amount");
+ok(ds.inputs.r_e === "0x" + recovered.toString(16).padStart(64, "0"), "witness carries the derived r_e");
 
 // Determinism + per-sigma uniqueness.
 ok(deriveEphemeralRE(sender.vk, tw.payload.sigma) === tw.rEScalar, "derivation is deterministic");
@@ -68,6 +75,40 @@ const twRand = buildTransferWitness({
 });
 ok(twRand.rEScalar === 31337n, "explicit p.rE override respected");
 ok(scalarMul(31337n, H).equals(twRand.payload.rE), "override R_e consistent");
+
+// ...but such a transfer is NOT disclosable by its sender, and that is a typed
+// outcome, not a proving error (docs/sdk/clients.md#disclosure-construction).
+const randEvent = { rE: twRand.payload.rE, sigma: twRand.payload.sigma, vTilde: twRand.payload.vTilde };
+ok(senderEphemeralScalar(sender, randEvent) === null, "override r_e: not disclosable");
+ok(senderEphemeralScalar(recipient, event) === null, "non-originator keys: not disclosable");
+let caught;
+try {
+  buildDiscloseSenderWitness({ keys: sender, event: randEvent, pvkB: recipient.PVK, pR: scalarMul(99n, H), nu: 1n });
+} catch (e) {
+  caught = e;
+}
+ok(caught instanceof NotDisclosableError && caught.reason === "ephemeral-scalar-mismatch", "builder throws NotDisclosableError");
+// proveSenderDisclosure returns the outcome before it ever touches the prover.
+let proverTouched = false;
+const stubProver = { zk: true, prove: async () => { proverTouched = true; throw new Error("unreachable"); } };
+const outcome = await proveSenderDisclosure({
+  keys: sender,
+  event: { ...randEvent, id: "x", ledger: 1, txHash: "00", type: "transfer" },
+  pvkB: recipient.PVK,
+  request: { pR: { x: "0x" + "0".repeat(63) + "1", y: "0x" + "0".repeat(63) + "2" }, nu: "0x01" },
+  prover: stubProver,
+});
+ok(outcome.disclosable === false && outcome.reason === "ephemeral-scalar-mismatch" && !("bundle" in outcome),
+  "proveSenderDisclosure: { disclosable: false } with no proof and no amount");
+ok(!proverTouched, "not-disclosable outcome never reaches the prover");
+let zkErr;
+try {
+  await proveSenderDisclosure({ keys: sender, event: { ...event, id: "x", ledger: 1, txHash: "00", type: "transfer" },
+    pvkB: recipient.PVK, request: { pR: { x: "0x01", y: "0x02" }, nu: "0x01" }, prover: { zk: false } });
+} catch (e) {
+  zkErr = e;
+}
+ok(zkErr && /zk: true/.test(zkErr.message), "disclosure proving refuses a non-ZK prover");
 
 // Withdraw derives r_e the same way (keys-and-commitments.md#ecdh-derived-blinding:
 // "Transfer, Withdraw, and SetSpender from the owner's viewing key").

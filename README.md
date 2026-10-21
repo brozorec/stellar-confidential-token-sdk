@@ -19,7 +19,8 @@ exactly, validated by executing the real circuits in the test suite.
   plus the two disclosure circuits), mirroring each circuit's public-input
   order.
 - **proving** — UltraHonk via `bb.js` with a **keccak transcript** (required:
-  the on-chain verifier uses keccak256 Fiat–Shamir).
+  the on-chain verifier uses keccak256 Fiat–Shamir); non-ZK for the on-chain
+  circuits, ZK for the off-chain disclosure circuits.
 - **chain** — RPC client, `{payload, proof}` XDR envelopes, operation
   submitters, and event ingestion, with an optional indexer as a second event
   source.
@@ -58,9 +59,11 @@ indexer and skips itself unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set.
 
 | Path | Contents |
 |:---|:---|
-| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer circuits. |
+| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer / clawback circuits, from `stellar-confidential`. |
 | `circuits/vks/*.vk.bin` | Verification keys, as registered with the on-chain verifier contract. |
 | `circuits/disclosure/` | Compiled disclosure circuits and their pinned verification keys. |
+| `circuits/disclosure/noir/` | Noir source of the disclosure circuits. Upstream specifies them but ships no implementation, so they are built here (`pnpm exec tsx scripts/build-disclosure.mjs`) against upstream's circuit library. |
+| `circuits/manifest.json` | Source tag, toolchain, and sha256 of every artifact above. |
 
 Two properties of these files matter to every consumer:
 
@@ -73,9 +76,15 @@ Two properties of these files matter to every consumer:
   a VK from the circuit bytecode and requires it to match the pinned
   `*.vk.json` byte-for-byte before trusting any verify result.
 
-All proofs use keccak256 Fiat–Shamir transcripts (`bb.js` `{ keccak: true }`)
-because the on-chain verifier is keccak. A default-transcript proof never
-verifies on-chain.
+All proofs use keccak256 Fiat–Shamir transcripts because the on-chain verifier
+is keccak; a default-transcript proof never verifies on-chain. The on-chain
+circuits are proven in the non-ZK flavour (`bb.js` `{ keccak: true }`), the
+only one the on-chain verifier implements. Disclosure proofs are handed to a
+third party and verified by `bb.js`, so they use the ZK flavour
+(`{ keccakZK: true }`): construct their provers with
+`new CircuitProver(artifact, { zk: true })`. The VK is the same in both
+flavours, so the pin cannot catch a flavour mix-up; the disclosure API rejects
+a non-ZK prover instead.
 
 ## Browser usage
 

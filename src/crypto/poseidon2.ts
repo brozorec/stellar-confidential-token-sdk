@@ -151,13 +151,13 @@ export const encryptEscAllowRAuditor = (rA: bigint, sAs: bigint, opI: bigint): b
   frAdd(rA, poseidonWithDomain(DOMAIN.ESCROWED_ALLOWANCE_BLINDING_AUDITOR, [sAs, opI]));
 
 /**
- * `v_tilde_disc = v_tx + Poseidon2(DISCLOSURE, s_disc_x, nu)` — the U3 stage
- * of every selective-disclosure circuit. The
- * recipient inverts it with {@link decryptWithDomain} after ECDH-recovering
- * `s_disc_x` from the bundle's `R_disc`.
+ * `v_tilde_disc = v_tx + Poseidon2(DISCLOSURE, s_disc, nu)` — the U3 stage
+ * of every selective-disclosure circuit, where `s_disc = ecdh(r_disc, P_R)`
+ * is the ECDH scalar (U2), not a raw x-coordinate. The recipient inverts it
+ * with {@link decryptWithDomain} after recovering `s_disc = ecdh(r_R, R_disc)`.
  */
-export const encryptDisclosure = (vTx: bigint, sDiscX: bigint, nu: bigint): bigint =>
-  frAdd(vTx, poseidonWithDomain(DOMAIN.DISCLOSURE, [sDiscX, nu]));
+export const encryptDisclosure = (vTx: bigint, sDisc: bigint, nu: bigint): bigint =>
+  frAdd(vTx, poseidonWithDomain(DOMAIN.DISCLOSURE, [sDisc, nu]));
 
 /**
  * Decrypt a scalar ciphertext: `plaintext = ciphertext - Poseidon2(tag, ...)`.

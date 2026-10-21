@@ -59,5 +59,38 @@ for (const f of present.filter((p) => p.endsWith(".vk.bin"))) {
   ok(readFileSync(join(CIRCUITS, f)).length === 1760, `${f}: not 1760 bytes`);
 }
 
+// Disclosure: built here (scripts/build-disclosure.mjs), recorded separately.
+// Prover and receiver must load identical files, so these hashes are the
+// cross-client contract for the disclosure layer.
+const disclosure = manifest.disclosure?.sha256 ?? {};
+const disclosurePresent = readdirSync(join(CIRCUITS, "disclosure"))
+  .filter((f) => f.endsWith(".json"))
+  .map((f) => `disclosure/${f}`);
+ok(disclosurePresent.length === 4, `disclosure/: ${disclosurePresent.length} json files, expected 4`);
+for (const f of disclosurePresent) {
+  ok(f in disclosure, `${f}: present but not recorded in manifest.json disclosure`);
+  if (f in disclosure) ok(sha(f) === disclosure[f], `${f}: sha256 ${sha(f)} != manifest ${disclosure[f]}`);
+}
+const DISCLOSURE_ARITY = { disclose_recipient: 13, disclose_sender: 15 };
+for (const [name, n] of Object.entries(DISCLOSURE_ARITY)) {
+  const c = JSON.parse(readFileSync(join(CIRCUITS, "disclosure", `${name}.json`), "utf8"));
+  const vk = JSON.parse(readFileSync(join(CIRCUITS, "disclosure", `${name}.vk.json`), "utf8"));
+  const pub = c.abi.parameters.filter((p) => p.visibility === "public");
+  ok(pub.length === n, `${name}: ${pub.length} public inputs, expected ${n}`);
+  ok(
+    c.noir_version.startsWith(manifest.toolchain.nargo + "+") && vk.noirVersion === c.noir_version,
+    `${name}: artifact ${c.noir_version} / VK ${vk.noirVersion}, manifest says ${manifest.toolchain.nargo}`,
+  );
+  ok(vk.oracleHash === "keccak" && vk.zk === true, `${name}: VK pin is not keccak + ZK`);
+  ok(
+    Object.values(c.file_map).every((f) => !f.path.startsWith("/")),
+    `${name}: file_map carries an absolute (machine-specific) path`,
+  );
+  // The disclosure circuits must be built on the same circuit library release
+  // as the core circuits (the point_hint fix lives there).
+  const toml = readFileSync(join(CIRCUITS, "disclosure", "noir", name, "Nargo.toml"), "utf8");
+  ok(toml.includes(`tag = "${manifest.source.tag}"`), `${name}: Nargo.toml does not pin ${manifest.source.tag}`);
+}
+
 console.log(`\nartifacts: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
