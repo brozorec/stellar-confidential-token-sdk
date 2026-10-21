@@ -1,4 +1,4 @@
-// SDK.md §6.1 primitive-fixture conformance: "An implementation MUST reproduce
+// docs/sdk/conformance.md#primitive-fixtures conformance: "An implementation MUST reproduce
 // every output in every file byte-for-byte", and the suite "MUST read those
 // files rather than transcribe their values into source".
 //

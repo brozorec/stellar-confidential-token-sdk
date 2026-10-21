@@ -32,6 +32,66 @@ exactly, validated by executing the real circuits in the test suite.
   resolution via RPC, on-chain key lookup, VK pinning, decryption) on the
   receiver side.
 
+## Coverage
+
+Declared per `stellar-confidential`
+[docs/sdk/requirements.md#conformance-and-versioning](https://github.com/OpenZeppelin/stellar-contracts/blob/v0.8.0/packages/confidential/docs/sdk/requirements.md#conformance-and-versioning):
+partial coverage is conformant only if it is stated.
+
+**Implemented**
+
+- **Holder role, for the Register, Withdraw and Transfer circuits**:
+  witness assembly, proving, and submission. The primitive fixtures and
+  circuit-execution parity (with tamper rejection) are tested against the real
+  compiled circuits.
+- **Holder wallet state**: replay of every event that changes a balance,
+  including those a holder cannot prove (merges, `revoke_spender`,
+  `set_spender`, `spender_transfer` credits, `clawback`), with an on-chain
+  consistency check after every sync and before every proof.
+- **Selective disclosure**: D-recipient and D-sender, on `Transfer` events
+  only. The circuits are built here from upstream's specification.
+
+**Not implemented.** The SDK makes no conformance claim for:
+
+- SetSpender and SpenderTransfer proving, and the spender-side wallet (the
+  spender role).
+- Clawback proving and the stateful auditor of `docs/sdk/auditor-client.md`
+  (the auditor role). `auditor/` decrypts single events only.
+- D-auditor, D-balance and aggregate disclosures, and any disclosure of a
+  `SpenderTransfer` event.
+
+**Known gaps in the holder role.** Each of these MUST-level requirements is
+still open:
+
+- No on-chain verification-key identity check before submitting a proof
+  (`docs/sdk/proving.md#verification-key-identity`).
+- The indexer's completeness signal is not propagated, and the indexer's
+  ingested-through point is not checked against the seam
+  (`IndexerClient.health()` exists, but nothing calls it).
+- Same-ledger event order is not guaranteed: indexer rows carry no
+  `tx_application_order`.
+- No warning when the client has not synced within the retention window.
+- An `r` in `[r, p)` is reduced silently instead of being reported as
+  unspendable.
+- The signer-root obligations of `docs/sdk/key-derivation.md#signer-roots`
+  (verify the signature, obtain it twice, never persist it) are left to the
+  caller.
+
+## Versions
+
+Exported as `VERSIONS` and `versionMatrix(token)`, which adds the
+deployment's contract address and `addr_f`. `test/artifacts.mjs` pins every
+value below against `circuits/manifest.json` and `package.json`.
+
+| Component | Version |
+|:---|:---|
+| Protocol | `stellar-confidential` 0.8.0 (stellar-contracts `v0.8.0`, `ddc327e`) |
+| Circuits / VKs compiled with | nargo `1.0.0-beta.11` |
+| Prover (VKs reproduced with) | `bb` / `@aztec/bb.js` `0.87.0` — keep exact; the on-chain verifier is audited against it |
+| Witness solver | `@noir-lang/noir_js` `1.0.0-beta.11` |
+| On-chain verifier | `ultrahonk_soroban_verifier` 0.1.0 (keccak transcript, non-ZK) |
+| Domain separators | sequential `1..17` (not the hashed alternate scheme) |
+
 ## Install
 
 Not yet published to npm. Consume as a git dependency:

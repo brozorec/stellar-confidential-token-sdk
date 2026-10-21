@@ -92,7 +92,7 @@ for (const file of files) {
   }
 }
 
-// New upstream fixtures are new conformance obligations (§6.1 covers "every
+// New upstream fixtures are new conformance obligations (conformance.md#primitive-fixtures covers "every
 // file"), so an unvendored one is a failure, not a curiosity.
 try {
   const resp = await fetch(API, { headers: API_HEADERS });

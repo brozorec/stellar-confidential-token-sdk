@@ -10,6 +10,10 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { VERSIONS, versionMatrix } from "../src/version.ts";
+import { addressToField } from "../src/crypto/address.ts";
+import { toHex32 } from "../src/crypto/field.ts";
+
 const CIRCUITS = join(dirname(fileURLToPath(import.meta.url)), "..", "circuits");
 
 let pass = 0, fail = 0;
@@ -91,6 +95,34 @@ for (const [name, n] of Object.entries(DISCLOSURE_ARITY)) {
   const toml = readFileSync(join(CIRCUITS, "disclosure", "noir", name, "Nargo.toml"), "utf8");
   ok(toml.includes(`tag = "${manifest.source.tag}"`), `${name}: Nargo.toml does not pin ${manifest.source.tag}`);
 }
+
+// The exported version matrix must describe what actually ships.
+const pkg = JSON.parse(readFileSync(join(CIRCUITS, "..", "package.json"), "utf8"));
+ok(VERSIONS.sdk === pkg.version, `VERSIONS.sdk ${VERSIONS.sdk} != package.json ${pkg.version}`);
+ok(
+  `${VERSIONS.protocol.crate} ${VERSIONS.protocol.version}` === manifest.source.crate &&
+    VERSIONS.protocol.tag === manifest.source.tag &&
+    VERSIONS.protocol.commit === manifest.source.commit &&
+    VERSIONS.protocol.repository === manifest.source.repository,
+  "VERSIONS.protocol does not match manifest.json source",
+);
+ok(
+  VERSIONS.toolchain.nargo === manifest.toolchain.nargo && VERSIONS.toolchain.bb === manifest.toolchain.bb,
+  "VERSIONS.toolchain nargo/bb do not match manifest.json toolchain",
+);
+ok(VERSIONS.toolchain.bbJs === pkg.dependencies["@aztec/bb.js"], "VERSIONS.toolchain.bbJs != package.json");
+ok(VERSIONS.toolchain.noirJs === pkg.dependencies["@noir-lang/noir_js"], "VERSIONS.toolchain.noirJs != package.json");
+const vkEntries = Object.entries({ ...manifest.sha256, ...(manifest.disclosure?.sha256 ?? {}) })
+  .filter(([f]) => f.endsWith(".vk.bin") || f.endsWith(".vk.json"))
+  .sort(([a], [b]) => a.localeCompare(b));
+ok(
+  JSON.stringify(vkEntries) ===
+    JSON.stringify(Object.entries(VERSIONS.verificationKeys).sort(([a], [b]) => a.localeCompare(b))),
+  "VERSIONS.verificationKeys != the VK entries of manifest.json",
+);
+const TOKEN = "CBF64DEOVQAXJFBSNGFEUT2AH4H7K5JBY3ZYJ5GVEINMNSDISWRG5N3F";
+ok(versionMatrix(TOKEN).deployment?.addrF === toHex32(addressToField(TOKEN)), "versionMatrix addr_f");
+ok(versionMatrix().deployment === null, "versionMatrix without a token has no deployment");
 
 console.log(`\nartifacts: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
