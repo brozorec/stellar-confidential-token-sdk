@@ -68,15 +68,19 @@ export async function verifyDisclosure(params: {
   request: DisclosureRequest;
   /** The verifier's keypair (request.pR must be its public half). */
   keys: RecipientKeys;
-  /** Prover/verifier over the shared artifact for the BUNDLE's circuit_id. */
+  /**
+   * ZK prover/verifier (`{ zk: true }`) over the shared artifact for the
+   * BUNDLE's circuit_id.
+   */
   prover: CircuitProver;
   /**
-   * Pinned verification key (the vk.json in `circuits/disclosure/` matching
-   * the bundle's circuit_id). When given, the VK derived from the loaded
-   * circuit bytecode must match byte-for-byte — this makes the "circuit_id →
-   * audited circuit" agreement checkable.
+   * Pinned verification key: the decoded `vkBase64` of the vk.json in
+   * `circuits/disclosure/` matching the bundle's circuit_id. The VK derived
+   * from the loaded circuit bytecode must match it byte-for-byte; without
+   * that, the proof attests to an unknown statement
+   * (docs/sdk/clients.md#disclosure-verification).
    */
-  pinnedVk?: Uint8Array;
+  pinnedVk: Uint8Array;
   /**
    * Optional Goldsky indexer. When given, `ref_E` is resolved via the indexer
    * first (so disclosures of transfers older than the RPC's ~7-day window still
@@ -95,21 +99,29 @@ export async function verifyDisclosure(params: {
     throw new DisclosureVerifyError("decrypt", "request was not issued under this recipient key");
   }
 
-  // Pin the verification key before trusting any verify result.
-  if (pinnedVk) {
-    const vk = await prover.verificationKey();
-    if (vk.length !== pinnedVk.length || !vk.every((b, i) => b === pinnedVk[i])) {
-      throw new DisclosureVerifyError(
-        "vk-pinning",
-        `circuit artifact does not match the pinned "${bundle.circuitId}" verification key`,
-      );
-    }
-    steps.push(
-      `VK pinned: ${bundle.circuitId} artifact matches the shared ${vk.length}B verification key`,
+  // Pin the verification key before trusting any verify result. The VK is the
+  // same in both proof flavours, so the flavour is checked separately.
+  if (!prover.zk) {
+    throw new DisclosureVerifyError(
+      "vk-pinning",
+      "disclosure proofs are ZK-flavour; construct the verifying prover with { zk: true }",
     );
   }
+  const vk = await prover.verificationKey();
+  if (vk.length !== pinnedVk.length || !vk.every((b, i) => b === pinnedVk[i])) {
+    throw new DisclosureVerifyError(
+      "vk-pinning",
+      `circuit artifact does not match the pinned "${bundle.circuitId}" verification key`,
+    );
+  }
+  steps.push(
+    `VK pinned: ${bundle.circuitId} artifact matches the shared ${vk.length}B verification key`,
+  );
 
-  // Step 1 — resolve ref_E to exactly one token-contract event.
+  // Step 1 — resolve ref_E to exactly one token-contract event. The decoder
+  // requires every Transfer field the contract emits (from, to, R_e, sigma,
+  // v_tilde, b_tilde, the recipient- and sender-auditor channels including
+  // r_tilde_aud_s), so a short or renamed payload never reaches step 4.
   const event = await hybridResolveEventRef(client, indexer, bundle.refE);
   if (!event) {
     throw new DisclosureVerifyError(
@@ -178,7 +190,7 @@ export async function verifyDisclosure(params: {
   ].map((h) => toHex32(fromHex(h)));
   steps.push("Constructed the public-input vector from chain state + own (P_R, ν)");
 
-  // Step 5 — UltraHonk verification.
+  // Step 5 — UltraHonk verification (ZK flavour, keccak transcript).
   const ok = await prover.verify({ proof: hexToBytes(bundle.proof), publicInputs });
   if (!ok) {
     throw new DisclosureVerifyError("verify-proof", "UltraHonk proof verification failed");

@@ -1,10 +1,10 @@
 {
   "primitive": "sk_derivation_chain",
   "design_doc_refs": [
-    "SDK.md Section 5.1",
-    "SDK.md Section 6.3"
+    "docs/sdk/key-derivation.md#derivation",
+    "docs/sdk/conformance.md#vectors-this-specification-requires"
   ],
-  "description": "The full account-secret derivation, from a SEP-0053 signer root through addr_f and acct_f to sk, vk, Y and PVK. Section 6.3 requires a fixture for this chain including the signature preimage and the resulting signature; none is published, so this one is offered. The rejection counter j is included because it is an OUTPUT, not an input: a client that samples candidates differently lands on a different j and therefore a different sk from the same root.",
+  "description": "The full account-secret derivation, from a SEP-0053 signer root through addr_f and acct_f to sk, vk, Y and PVK. docs/sdk/conformance.md#vectors-this-specification-requires asks for a fixture for this chain including the signature preimage and the resulting signature; none is published, so this one is offered. The rejection counter j is included because it is an OUTPUT, not an input: a client that samples candidates differently lands on a different j and therefore a different sk from the same root.",
   "vectors": [
     {
       "inputs": {

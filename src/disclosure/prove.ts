@@ -5,7 +5,9 @@
  *
  *   - proveRecipientDisclosure — the event paid me (D-recipient)
  *   - proveSenderDisclosure    — I sent the event (D-sender; r_e is
- *                                re-derived from vk + the event's sigma)
+ *                                re-derived from vk + the event's sigma, and
+ *                                an event it does not reproduce is reported
+ *                                as not disclosable)
  *
  * Pure orchestration over the witness builders + prover; the heavy lifting
  * (ECDH decrypt, U-block) is in witness/disclose-{recipient,sender}.ts.
@@ -18,7 +20,11 @@ import type { TransferEvent } from "../chain/events.js";
 import { eventRef } from "../chain/events.js";
 import type { CircuitProver } from "../proving/prover.js";
 import { buildDiscloseRecipientWitness } from "../witness/disclose-recipient.js";
-import { buildDiscloseSenderWitness } from "../witness/disclose-sender.js";
+import {
+  buildDiscloseSenderWitness,
+  NotDisclosableError,
+  type DiscloseSenderWitness,
+} from "../witness/disclose-sender.js";
 import {
   DISCLOSE_RECIPIENT_CIRCUIT_ID,
   DISCLOSE_SENDER_CIRCUIT_ID,
@@ -28,6 +34,17 @@ import {
 } from "./types.js";
 import { pointFromJson, pointToJson } from "./recipient.js";
 
+/**
+ * Outcome of a D-sender attempt. `disclosable: false` carries neither a proof
+ * nor an amount: the event's `R_e` is not `deriveEphemeralRE(vk, sigma) · H`
+ * for these keys, so no D-sender proof exists for it (see
+ * `senderEphemeralScalar`). It is not an error — the transfer may predate
+ * deterministic ephemeral scalars.
+ */
+export type SenderDisclosureOutcome =
+  | { disclosable: true; bundle: DisclosureBundle }
+  | { disclosable: false; reason: NotDisclosableError["reason"] };
+
 export async function proveRecipientDisclosure(params: {
   /** Holder's key set — must be the event's `to` account. */
   keys: KeyPair;
@@ -35,10 +52,11 @@ export async function proveRecipientDisclosure(params: {
   event: TransferEvent;
   /** The recipient's request, received out-of-band. */
   request: DisclosureRequest;
-  /** Prover over the shared disclose_recipient artifact (`circuits/disclosure/`). */
+  /** ZK prover over the shared disclose_recipient artifact (`circuits/disclosure/`). */
   prover: CircuitProver;
 }): Promise<DisclosureBundle> {
   const { keys, event, request, prover } = params;
+  requireZk(prover, DISCLOSE_RECIPIENT_CIRCUIT_ID);
   const w = buildDiscloseRecipientWitness({
     keys,
     event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
@@ -52,28 +70,43 @@ export async function proveRecipientDisclosure(params: {
 export async function proveSenderDisclosure(params: {
   /** Originator's key set — must be the event's `from` account. */
   keys: KeyPair;
-  /** The transfer's ephemeral scalar, re-derived via `deriveEphemeralRE`. */
-  rEScalar: bigint;
   /** The outbound transfer event being disclosed. */
   event: TransferEvent;
   /** Transfer recipient's stored viewing key (read from the account at `E.to`). */
   pvkB: Point;
   /** The recipient's request, received out-of-band. */
   request: DisclosureRequest;
-  /** Prover over the shared disclose_sender artifact (`circuits/disclosure/`). */
+  /** ZK prover over the shared disclose_sender artifact (`circuits/disclosure/`). */
   prover: CircuitProver;
-}): Promise<DisclosureBundle> {
-  const { keys, rEScalar, event, pvkB, request, prover } = params;
-  const w = buildDiscloseSenderWitness({
-    keys,
-    rEScalar,
-    event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
-    pvkB,
-    pR: pointFromJson(request.pR),
-    nu: fromHex(request.nu),
-  });
+}): Promise<SenderDisclosureOutcome> {
+  const { keys, event, pvkB, request, prover } = params;
+  requireZk(prover, DISCLOSE_SENDER_CIRCUIT_ID);
+  // The builder establishes disclosability first, so a non-disclosable event
+  // never reaches the prover.
+  let w: DiscloseSenderWitness;
+  try {
+    w = buildDiscloseSenderWitness({
+      keys,
+      event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
+      pvkB,
+      pR: pointFromJson(request.pR),
+      nu: fromHex(request.nu),
+    });
+  } catch (e) {
+    if (e instanceof NotDisclosableError) return { disclosable: false, reason: e.reason };
+    throw e;
+  }
   const { proof } = await prover.prove(w.inputs);
-  return bundle(DISCLOSE_SENDER_CIRCUIT_ID, event, proof, w);
+  return { disclosable: true, bundle: bundle(DISCLOSE_SENDER_CIRCUIT_ID, event, proof, w) };
+}
+
+/** Disclosure proofs are ZK-flavour; a non-ZK proof never verifies against the pin. */
+function requireZk(prover: CircuitProver, circuitId: DisclosureCircuitId): void {
+  if (!prover.zk) {
+    throw new Error(
+      `${circuitId}: disclosure provers must be constructed with { zk: true } (circuits/disclosure/${circuitId}.vk.json)`,
+    );
+  }
 }
 
 function bundle(

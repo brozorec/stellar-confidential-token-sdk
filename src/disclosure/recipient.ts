@@ -47,7 +47,7 @@ export function newDisclosureRequest(keys: RecipientKeys): DisclosureRequest {
 
 /**
  * Receiver-protocol step 6 — open the disclosure ciphertext:
- * `S_disc = r_R · R_disc`, `v_tx = v_tilde_disc - Poseidon2(δ_disc, S_disc.x, nu)`.
+ * `s_disc = ecdh(r_R, R_disc)`, `v_tx = v_tilde_disc - Poseidon2(δ_disc, s_disc, nu)`.
  * Only meaningful after the proof verified; callers must not surface the
  * value from a bundle that failed any receiver-protocol step.
  */

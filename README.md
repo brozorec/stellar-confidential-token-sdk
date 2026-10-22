@@ -19,7 +19,8 @@ exactly, validated by executing the real circuits in the test suite.
   plus the two disclosure circuits), mirroring each circuit's public-input
   order.
 - **proving** — UltraHonk via `bb.js` with a **keccak transcript** (required:
-  the on-chain verifier uses keccak256 Fiat–Shamir).
+  the on-chain verifier uses keccak256 Fiat–Shamir); non-ZK for the on-chain
+  circuits, ZK for the off-chain disclosure circuits.
 - **chain** — RPC client, `{payload, proof}` XDR envelopes, operation
   submitters, and event ingestion, with an optional indexer as a second event
   source.
@@ -30,6 +31,69 @@ exactly, validated by executing the real circuits in the test suite.
   building and proving on the holder side; the full receiver protocol (event
   resolution via RPC, on-chain key lookup, VK pinning, decryption) on the
   receiver side.
+
+## Coverage
+
+Declared per `stellar-confidential`
+[docs/sdk/requirements.md#conformance-and-versioning](https://github.com/OpenZeppelin/stellar-contracts/blob/v0.8.0/packages/confidential/docs/sdk/requirements.md#conformance-and-versioning):
+partial coverage is conformant only if it is stated.
+
+**Implemented**
+
+- **Holder role, for the Register, Withdraw and Transfer circuits**:
+  witness assembly, proving, and submission. The primitive fixtures and
+  circuit-execution parity (with tamper rejection) are tested against the real
+  compiled circuits.
+- **Holder wallet state**: replay of every event that changes a balance,
+  including those a holder cannot prove (merges, `revoke_spender`,
+  `set_spender`, `spender_transfer` credits, `clawback`). Every sync ends
+  with an on-chain consistency check. The check before a proof is
+  `StateEngine.spendableForProof()`: the witness builders take a raw `(v, r)`
+  and cannot check it, so an integrator must take the spendable opening from
+  `spendableForProof()`.
+- **Selective disclosure**: D-recipient and D-sender, on `Transfer` events
+  only. The circuits are built here from upstream's specification.
+
+**Not implemented.** The SDK makes no conformance claim for:
+
+- SetSpender and SpenderTransfer proving, and the spender-side wallet (the
+  spender role).
+- Clawback proving and the stateful auditor of `docs/sdk/auditor-client.md`
+  (the auditor role). `auditor/` decrypts single events only.
+- D-auditor, D-balance and aggregate disclosures, and any disclosure of a
+  `SpenderTransfer` event.
+
+**Known gaps in the holder role.** Each of these MUST-level requirements is
+still open:
+
+- No on-chain verification-key identity check before submitting a proof
+  (`docs/sdk/proving.md#verification-key-identity`).
+- The indexer's completeness signal is not propagated, and the indexer's
+  ingested-through point is not checked against the seam
+  (`IndexerClient.health()` exists, but nothing calls it).
+- Same-ledger event order is not guaranteed: indexer rows carry no
+  `tx_application_order`.
+- No warning when the client has not synced within the retention window.
+- An `r` in `[r, p)` is reduced silently instead of being reported as
+  unspendable.
+- The signer-root obligations of `docs/sdk/key-derivation.md#signer-roots`
+  (verify the signature, obtain it twice, never persist it) are left to the
+  caller.
+
+## Versions
+
+Exported as `VERSIONS` and `versionMatrix(token)`, which adds the
+deployment's contract address and `addr_f`. `test/artifacts.mjs` pins every
+value below against `circuits/manifest.json` and `package.json`.
+
+| Component | Version |
+|:---|:---|
+| Protocol | `stellar-confidential` 0.8.0 (stellar-contracts `v0.8.0`, `ddc327e`) |
+| Circuits / VKs compiled with | nargo `1.0.0-beta.11` |
+| Prover (VKs reproduced with) | `bb` / `@aztec/bb.js` `0.87.0` — keep exact; the on-chain verifier is audited against it |
+| Witness solver | `@noir-lang/noir_js` `1.0.0-beta.11` |
+| On-chain verifier | `ultrahonk_soroban_verifier` 0.1.0 (keccak transcript, non-ZK) |
+| Domain separators | sequential `1..17` (not the hashed alternate scheme) |
 
 ## Install
 
@@ -58,9 +122,11 @@ indexer and skips itself unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set.
 
 | Path | Contents |
 |:---|:---|
-| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer circuits. |
+| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer / clawback circuits, from `stellar-confidential`. |
 | `circuits/vks/*.vk.bin` | Verification keys, as registered with the on-chain verifier contract. |
 | `circuits/disclosure/` | Compiled disclosure circuits and their pinned verification keys. |
+| `circuits/disclosure/noir/` | Noir source of the disclosure circuits. Upstream specifies them but ships no implementation, so they are built here (`pnpm exec tsx scripts/build-disclosure.mjs`) against upstream's circuit library. |
+| `circuits/manifest.json` | Source tag, toolchain, and sha256 of every artifact above. |
 
 Two properties of these files matter to every consumer:
 
@@ -73,9 +139,15 @@ Two properties of these files matter to every consumer:
   a VK from the circuit bytecode and requires it to match the pinned
   `*.vk.json` byte-for-byte before trusting any verify result.
 
-All proofs use keccak256 Fiat–Shamir transcripts (`bb.js` `{ keccak: true }`)
-because the on-chain verifier is keccak. A default-transcript proof never
-verifies on-chain.
+All proofs use keccak256 Fiat–Shamir transcripts because the on-chain verifier
+is keccak; a default-transcript proof never verifies on-chain. The on-chain
+circuits are proven in the non-ZK flavour (`bb.js` `{ keccak: true }`), the
+only one the on-chain verifier implements. Disclosure proofs are handed to a
+third party and verified by `bb.js`, so they use the ZK flavour
+(`{ keccakZK: true }`): construct their provers with
+`new CircuitProver(artifact, { zk: true })`. The VK is the same in both
+flavours, so the pin cannot catch a flavour mix-up; the disclosure API rejects
+a non-ZK prover instead.
 
 ## Browser usage
 
@@ -106,16 +178,28 @@ source:
 - It persists decrypted openings locally and tracks a sync cursor. With the
   RPC alone, local persistence is load-bearing for correctness; with an
   indexer, a fresh client can also rebuild from full history.
-- The spendable balance is recoverable from the most recent withdraw or
-  transfer event alone, so a regular spender is robust within the window.
-- The receiving balance is a running sum: with the RPC only, if an
-  incoming-transfer event ages out before you sync, that credit's opening is
-  unrecoverable — sync at least once per retention period, or configure an
-  indexer.
+- The spendable balance restarts from the latest **checkpoint** — a withdraw,
+  an outgoing transfer, or a `set_spender` — each of which carries `b_tilde`.
+  It is not recoverable from that event alone: every merge, `revoke_spender`
+  and `clawback` after the checkpoint is folded on top of it.
+- The receiving balance is a running sum since the last merge or clawback.
+- With the RPC only, any of those accumulating events that ages out before
+  you sync takes its opening with it — an incoming credit, or a
+  `revoke_spender` whose `a_tilde` and salt survive nowhere else once the
+  delegation is deleted. Sync at least once per retention period, or
+  configure an indexer.
 
-`StateEngine.verifyAgainstChain()` re-commits the local openings and checks
-them against the on-chain commitments, so divergence is detected, never
-silently spent.
+Every `StateEngine.sync()` ends by re-committing the local openings and
+checking them against the on-chain commitments; a mismatch with the balance
+read at the ledger the events were fetched through throws a
+`StateDivergedError` that names the diverged accumulator, so divergence is
+detected, never silently spent. A mismatching read at another ledger is
+re-synced or re-read first; if the two never line up, the sync throws
+`StateUnverifiedError` (retry — it is not a divergence). `StateEngine.spendableForProof()` repeats the
+check against the current chain and returns the verified spendable opening.
+Build every withdraw and transfer witness from it, not from `current()` or a
+cached copy: the witness builders take whatever `(v, r)` they are given, so
+this call is the only check before a proof.
 
 ## License
 

@@ -18,8 +18,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       '@noir-lang/noir_js':
-        specifier: 1.0.0-beta.9
-        version: 1.0.0-beta.9
+        specifier: 1.0.0-beta.11
+        version: 1.0.0-beta.11
       '@stellar/stellar-sdk':
         specifier: ^14.2.0
         version: 14.6.1
@@ -237,17 +237,17 @@ packages:
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
 
-  '@noir-lang/acvm_js@1.0.0-beta.9':
-    resolution: {integrity: sha512-cWDKgOkDCj6USfSITB0IM/o3ThndLOsrH6pDptaB6D6wHpSxTOpl/pKP8m1KHXGLVsU0BjIImZ2RrWB4F3a2Pw==}
+  '@noir-lang/acvm_js@1.0.0-beta.11':
+    resolution: {integrity: sha512-g1CeqJlWNyJx1j+1t9sm3MxnDChbWSHa9UOOIQYBskxczhUHuUVfYve3xbe0DwSEiIBQ3gmTIKDmRPs+QboPvA==}
 
-  '@noir-lang/noir_js@1.0.0-beta.9':
-    resolution: {integrity: sha512-UDHvQBvWiAbo70+taFQyUgBysVxgxuMkEXxtQUPD8v9sbHp4J5ecGRrtp/1eq15D0zpVc34Vfo8zy2CWndfbaA==}
+  '@noir-lang/noir_js@1.0.0-beta.11':
+    resolution: {integrity: sha512-pZlz5/mGooHBUnucUULmbdU3gicxbaCg7t+wNoBN45JuFMU4vV32As4C1aTNNJDpDFaGupV7yXKVRcsJNTZ49w==}
 
-  '@noir-lang/noirc_abi@1.0.0-beta.9':
-    resolution: {integrity: sha512-JOBLJBZqE6skGztI5xy4GW5WB40YGADt0mU/vf1QAuVY9yArRU3oAJIjuXi4Mo1fvE1TSx/4XPZr7Rocl6Effg==}
+  '@noir-lang/noirc_abi@1.0.0-beta.11':
+    resolution: {integrity: sha512-D8nBgDGYe8uu4meu9ctGo52KIa0NeE/u2GBQi4DHJzE7/q5dVEqSyVVPImOyZWpvjPvb6thySxcDWbqY6JxOiw==}
 
-  '@noir-lang/types@1.0.0-beta.9':
-    resolution: {integrity: sha512-2KB4uSUUHjDZzrUY8CIRyaIS4Q9d0s1T9bwabw1rysSBICDkgKOdVKkG0szaCFbmeDNQ3kqanPjqBj7IEEHD7A==}
+  '@noir-lang/types@1.0.0-beta.11':
+    resolution: {integrity: sha512-b9zeK/uxecsOKxsgqRszNYtj7Z3A9k//GF4uQIzvYbDWyrPGgnfi297ysXZ8lqKV4xBSQ93qNp+VzW4XaTBGjQ==}
 
   '@stellar/js-xdr@3.1.2':
     resolution: {integrity: sha512-VVolPL5goVEIsvuGqDc5uiKxV03lzfWdvYg1KikvwheDmTBO68CKDji3bAZ/kppZrx5iTA8z3Ld5yuytcvhvOQ==}
@@ -657,20 +657,20 @@ snapshots:
 
   '@noble/hashes@1.8.0': {}
 
-  '@noir-lang/acvm_js@1.0.0-beta.9': {}
+  '@noir-lang/acvm_js@1.0.0-beta.11': {}
 
-  '@noir-lang/noir_js@1.0.0-beta.9':
+  '@noir-lang/noir_js@1.0.0-beta.11':
     dependencies:
-      '@noir-lang/acvm_js': 1.0.0-beta.9
-      '@noir-lang/noirc_abi': 1.0.0-beta.9
-      '@noir-lang/types': 1.0.0-beta.9
+      '@noir-lang/acvm_js': 1.0.0-beta.11
+      '@noir-lang/noirc_abi': 1.0.0-beta.11
+      '@noir-lang/types': 1.0.0-beta.11
       pako: 2.2.0
 
-  '@noir-lang/noirc_abi@1.0.0-beta.9':
+  '@noir-lang/noirc_abi@1.0.0-beta.11':
     dependencies:
-      '@noir-lang/types': 1.0.0-beta.9
+      '@noir-lang/types': 1.0.0-beta.11
 
-  '@noir-lang/types@1.0.0-beta.9': {}
+  '@noir-lang/types@1.0.0-beta.11': {}
 
   '@stellar/js-xdr@3.1.2': {}
 

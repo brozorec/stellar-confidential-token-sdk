@@ -4,7 +4,9 @@
 import {
   G, H, Grumpkin, scalarMul, commit, pointToBytes, pointFromBytes, isIdentity,
 } from "../src/crypto/grumpkin.ts";
-import { sponge, poseidonWithDomain, vkFromSk } from "../src/crypto/poseidon2.ts";
+import {
+  sponge, poseidonWithDomain, vkFromSk, spongeSqueeze2, spongeSqueeze3,
+} from "../src/crypto/poseidon2.ts";
 import { addressToField } from "../src/crypto/address.ts";
 import { G_X, G_Y, H_X, H_Y, FR_MODULUS, DOMAIN } from "../src/crypto/constants.ts";
 import { frAdd, fpAdd, randomScalar } from "../src/crypto/field.ts";
@@ -62,24 +64,31 @@ try {
 }
 
 // Domain separators are a cross-implementation contract: the
-// sixteen tags must be exactly 1..16 and distinct. Tags 14-16 are absorbed
+// seventeen tags must be exactly 1..17 and distinct. Tags 14-16 are absorbed
 // neither in a circuit nor on-chain, so NO proof or contract call fails if they
 // drift — only cross-client reads break, silently. Pinning them here is the
 // only guard. (Regression: EPHEMERAL_KEY and DISCLOSURE_BIND were swapped,
 // 15/14 instead of the spec's 14/15, which broke sender disclosability for any
 // second client following the spec.)
 const tags = Object.values(DOMAIN);
-ok(tags.length === 16, "sixteen domain tags");
+ok(tags.length === 17, "seventeen domain tags");
 ok(new Set(tags).size === tags.length, "domain tags distinct");
 ok(
   tags.slice().sort((a, b) => Number(a - b)).every((t, i) => t === BigInt(i + 1)),
-  "domain tags are exactly 1..16",
+  "domain tags are exactly 1..17",
 );
 ok(DOMAIN.AUDITOR_SENDER === 11n && DOMAIN.AUDITOR_RECIPIENT === 12n, "auditor tags 11/12");
 ok(DOMAIN.ECDH_SHARED_SECRET === 13n, "delta_ecdh == 13");
 ok(DOMAIN.EPHEMERAL_KEY === 14n, "delta_eph == 14");
 ok(DOMAIN.DISCLOSURE_BIND === 15n, "delta_disc_bind == 15");
 ok(DOMAIN.DISCLOSURE === 16n, "delta_disc == 16");
+ok(DOMAIN.ESCROWED_ALLOWANCE_BLINDING_AUDITOR === 17n, "delta_esc_allow_r_aud == 17");
+
+// Tag 11 is read three-wide, tag 12 two-wide, from ONE permutation: the
+// two-wide squeeze must be exactly the first two lanes of the three-wide one.
+const s3 = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, 0x12345n, 1n);
+const s2 = spongeSqueeze2(DOMAIN.AUDITOR_SENDER, 0x12345n, 1n);
+ok(s3.length === 3 && s2[0] === s3[0] && s2[1] === s3[1], "sponge_squeeze_2 == sponge_squeeze_3[0..2]");
 
 // randomScalar must be uniform on [1, r) via the specified rejection
 // procedure: clear the top 2 BITS, redraw if >= r. Masking the whole top byte

@@ -10,6 +10,7 @@
  *   - state/    RPC-only balance reconstruction with local persistence
  *   - disclosure/  off-chain selective disclosure (prove + verify)
  *   - auditor/  auditor-side event decryption
+ *   - version   the version matrix (protocol release, toolchain, VK set)
  */
 
 export * from "./crypto/index.js";
@@ -19,3 +20,4 @@ export * from "./chain/index.js";
 export * from "./state/index.js";
 export * from "./disclosure/index.js";
 export * from "./auditor/index.js";
+export * from "./version.js";

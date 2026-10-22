@@ -64,15 +64,17 @@ export const POSEIDON2_IV_BASE = 1n << 64n; // 2^64 = 18446744073709551616
 // Domain separation tags. The integer IS the contract: it is the first element
 // absorbed by every Poseidon2 call.
 //
-// Tags 1-13 mirror lib.nr `mod domain` and are the ON-CHAIN wire contract (1 is
-// absorbed by the contract rather than a circuit; 2-13 inside circuits). Tags
-// 14-16 are absorbed neither in a circuit nor on-chain, so they are not part of
-// the on-chain contract, but they ARE part of the cross-client contract — two
-// clients must agree or they cannot read each other's disclosures. Their
-// values are fixed by the protocol specification.
+// Tags 1-13 and 17 mirror lib.nr `mod domain` and are the ON-CHAIN wire
+// contract (1 is absorbed by the contract rather than a circuit; 2-13 and 17
+// inside circuits). Tags 14-16 are absorbed neither in a circuit nor on-chain,
+// so they are not part of the on-chain contract, but they ARE part of the
+// cross-client contract — two clients must agree or they cannot read each
+// other's disclosures. Their values are fixed by the protocol specification
+// (docs/protocol/domain-separators.md).
 //
-// All sixteen MUST be distinct, and each MUST be used in exactly one sponge
-// mode: 11 and 12 are the two-mask tags, the rest single-output.
+// All seventeen MUST be distinct, and each MUST be used in exactly one sponge
+// mode: 11 is squeezed three-wide (sponge_squeeze_3), 12 two-wide
+// (sponge_squeeze_2), the rest single-output.
 // ---------------------------------------------------------------------------
 
 export const DOMAIN = {
@@ -96,9 +98,13 @@ export const DOMAIN = {
   ALLOWANCE_RANDOMNESS: 9n,
   /** escrowed_dvk = dvk + Poseidon2(ESCROWED_DELEGATION_VIEWING_KEY, s, op_i). */
   ESCROWED_DELEGATION_VIEWING_KEY: 10n,
-  /** Sender / owner-auditor channel tag. */
+  /**
+   * Sender / owner-auditor channel tag — the only tag squeezed three-wide:
+   * lane 0 amount mask, lane 1 balance/allowance checkpoint mask, lane 2 the
+   * escrow of the blinding the operation writes (W_a3 / T_a6 / S_a3 / O_a6).
+   */
   AUDITOR_SENDER: 11n,
-  /** Recipient-auditor channel tag. */
+  /** Recipient-auditor channel tag, squeezed two-wide (T_a2 / O_a2). */
   AUDITOR_RECIPIENT: 12n,
   /**
    * ECDH shared-secret scalar extraction: `s = Poseidon2(ECDH_SHARED_SECRET,
@@ -124,14 +130,17 @@ export const DOMAIN = {
    */
   EPHEMERAL_KEY: 14n,
   /**
-   * Aggregate-disclosure nonce binding (`delta_disc_bind`). Reserved — not
-   * yet used.
+   * Disclosure ciphertext to the disclosure recipient, aggregate variant
+   * (`delta_disc_bind`, selective-disclosure/circuits/aggregate.md). Not yet
+   * used: this SDK implements no aggregate disclosure.
    */
   DISCLOSURE_BIND: 15n,
   /**
    * Off-chain selective-disclosure ciphertext to a disclosure recipient:
-   * `v_tilde_disc = v_transfer + Poseidon2(DISCLOSURE, S_disc.x, nu)`
-   * (`delta_disc`). Source of truth: the disclosure circuits.
+   * `v_tilde_disc = v_transfer + Poseidon2(DISCLOSURE, s_disc, nu)` with
+   * `s_disc = ecdh(r_disc, P_R)` (`delta_disc`). Value fixed by
+   * docs/protocol/domain-separators.md; absorbed by
+   * `circuits/disclosure/noir/*` (`DISCLOSURE`).
    *
    * 16 rather than 13: the circuit library uses 13 for {@link DOMAIN.ECDH_SHARED_SECRET},
    * and the disclosure circuits call `ecdh()` themselves — a shared tag would put
@@ -139,16 +148,27 @@ export const DOMAIN = {
    * making a disclosure pad collide with an ECDH scalar.
    */
   DISCLOSURE: 16n,
+  /**
+   * Allowance-blinding escrow to the owner's auditor (S14):
+   * `r_a_tilde_aud_s = r_a + Poseidon2(ESCROWED_ALLOWANCE_BLINDING_AUDITOR,
+   * s_a_s, op_i)`. Absorbed inside the set_spender circuit, so it is on-chain
+   * wire format even though this SDK does not prove set_spender.
+   */
+  ESCROWED_ALLOWANCE_BLINDING_AUDITOR: 17n,
 } as const;
 
-/** Verifier circuit-type discriminants (verifier/mod.rs `CircuitType`). */
+/**
+ * Verifier circuit-type discriminants (verifier/mod.rs `CircuitType`). Core
+ * token circuits occupy 0..=4; circuits shipped by optional extensions start
+ * at 100. There is no revoke_spender circuit: revocation is a proofless fold.
+ */
 export const CIRCUIT_TYPE = {
   Register: 0,
   Withdraw: 1,
   Transfer: 2,
   SpenderTransfer: 3,
   SetSpender: 4,
-  RevokeSpender: 5,
+  Clawback: 100,
 } as const;
 
 export type CircuitTypeName = keyof typeof CIRCUIT_TYPE;

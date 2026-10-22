@@ -1,0 +1,12 @@
+[package]
+name = "disclose_sender"
+type = "bin"
+authors = ["stellar-confidential-token-sdk"]
+# Nargo requirements cannot name prereleases; the supported toolchain is
+# nargo 1.0.0-beta.11 + bb 0.87.0, the same as the upstream core circuits.
+compiler_version = "=1.0.0"
+
+# The circuit library is the one the core circuits are compiled from, at the
+# release whose VKs the SDK ships (circuits/manifest.json `source`).
+[dependencies]
+stellar_confidential_lib = { git = "https://github.com/OpenZeppelin/stellar-contracts", tag = "v0.8.0", directory = "packages/confidential/circuits/lib" }

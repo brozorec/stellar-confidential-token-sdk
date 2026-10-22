@@ -34,12 +34,18 @@ const tw = buildTransferWitness({
 const tev = {
   rE: tw.payload.rE, sigma: tw.payload.sigma,
   vAudR: tw.payload.vAudR, rAudR: tw.payload.rAudR,
-  vAudS: tw.payload.vAudS, bAudS: tw.payload.bAudS,
+  vAudS: tw.payload.vAudS, bAudS: tw.payload.bAudS, rAudS: tw.payload.rAudS,
 };
 
 const audited = auditTransfer(k, tev);
 ok(audited.amount === amount, "transfer: amount recovered");
 ok(audited.senderBalance === v - amount, "transfer: sender post-balance recovered");
+ok(audited.senderBlinding === tw.next.r, "transfer: sender post-blinding recovered (lane 2)");
+// The sender channel is now a full opening of the sender's new C_spend.
+ok(
+  commit(audited.senderBalance, audited.senderBlinding).equals(tw.payload.cSpendNew),
+  "transfer: (senderBalance, senderBlinding) opens C_spend'",
+);
 ok(audited.channelsAgree, "transfer: both channels agree");
 // r_transfer must open the emitted C_transfer: commit(v_transfer, r_transfer) == C_transfer.
 ok(
@@ -60,9 +66,14 @@ ok(wrong.amount !== amount, "wrong key: amount not recovered");
 // --- withdraw: sender-channel balance checkpoint ----------------------------
 const ww = buildWithdrawWitness({ keys: sender, v, r, amount: 400n, kAudS: kAud });
 const wAudited = auditWithdraw(k, {
-  rE: ww.payload.rE, sigma: ww.payload.sigma, bAudS: ww.payload.bAudS,
+  rE: ww.payload.rE, sigma: ww.payload.sigma, bAudS: ww.payload.bAudS, rAudS: ww.payload.rAudS,
 });
 ok(wAudited.senderBalance === v - 400n, "withdraw: post-balance recovered");
+ok(wAudited.senderBlinding === ww.next.r, "withdraw: post-blinding recovered (lane 2)");
+ok(
+  commit(wAudited.senderBalance, wAudited.senderBlinding).equals(ww.payload.cSpendNew),
+  "withdraw: (senderBalance, senderBlinding) opens C_spend'",
+);
 
 console.log(`\nauditor: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

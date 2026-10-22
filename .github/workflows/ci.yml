@@ -24,11 +24,60 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # Keeps the vendored test/fixtures/ copy honest against upstream's
-      # circuits/lib/testdata (SDK.md §6.1); test/fixtures.mjs (in test:fast)
-      # then checks our crypto reproduces every vector byte-for-byte.
-      - run: node scripts/check-fixtures-upstream.mjs
       - run: pnpm test:fast
+
+  # Keeps the vendored test/fixtures/ copy honest against upstream's
+  # packages/confidential/circuits/lib/testdata; test/fixtures.mjs (in
+  # test:fast) then checks our crypto reproduces every vector byte-for-byte.
+  # Its own job so an upstream move (or path change) reports red here without
+  # ever stopping the test job from running.
+  fixtures-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-fixtures-upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # The disclosure circuits are built here, not upstream: rebuild them from
+  # circuits/disclosure/noir and fail if the committed artifacts, VK pins or
+  # manifest entry drift from the source, run their Noir tests, and check every
+  # shipped circuit for witness-dependent lookups (the #945 leak class).
+  disclosure-circuits:
+    runs-on: ubuntu-latest
+    env:
+      NARGO_VERSION: 1.0.0-beta.11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install noirup
+        # Same pinned script + SHA256 as stellar-contracts' noir.yml.
+        env:
+          NOIRUP_INSTALL_URL: https://raw.githubusercontent.com/noir-lang/noirup/c3bc9922bf7eeafdaba08fb6518776c4ba263a8c/install
+          NOIRUP_INSTALL_SHA256: 89dde59d8ef9e7794d694abca097fa139fa7395b947cb7b0b7a8d1839c737d8b
+        run: |
+          curl -fsSL "$NOIRUP_INSTALL_URL" -o /tmp/noirup-install.sh
+          echo "$NOIRUP_INSTALL_SHA256  /tmp/noirup-install.sh" | sha256sum -c -
+          bash /tmp/noirup-install.sh
+          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
+      - run: noirup -v "$NARGO_VERSION"
+      - name: Cache bb.js CRS
+        uses: actions/cache@v4
+        with:
+          path: ~/.bb-crs
+          key: bb-crs-0.87.0
+      - run: pnpm install --frozen-lockfile
+      - run: nargo test --workspace
+        working-directory: circuits/disclosure/noir
+      - run: pnpm exec tsx scripts/build-disclosure.mjs --check
+      - run: scripts/check-witness-lookups.sh
 
   # Full proving suite (UltraHonk proof generation + disclosure protocol).
   # Slow and CRS-hungry, so main pushes and manual runs only.

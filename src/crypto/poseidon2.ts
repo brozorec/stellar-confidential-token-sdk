@@ -55,15 +55,28 @@ export function poseidonWithDomain(d: bigint, inputs: bigint[]): bigint {
 }
 
 /**
- * Two-squeeze sponge (`lib.nr::sponge_squeeze_2`): absorbs `(d, s, sigma)` — `s`
- * being the ECDH shared-secret scalar from {@link ecdh} — in one block and
- * returns `[state[0], state[1]]`. Index 0 is the amount mask, index 1 is the
- * balance/randomness mask.
+ * Three-squeeze sponge (`lib.nr::sponge_squeeze_3`): absorbs `(d, s, sigma)` —
+ * `s` being the ECDH shared-secret scalar from {@link ecdh} — in one block and
+ * returns `[state[0], state[1], state[2]]`. Lane 0 is the amount mask, lane 1
+ * the balance/allowance mask, lane 2 the escrow of the blinding the operation
+ * writes. Only the sender-auditor channel ({@link DOMAIN.AUDITOR_SENDER}) is
+ * read three-wide.
  */
-export function spongeSqueeze2(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint] {
+export function spongeSqueeze3(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint, bigint] {
   const iv = frMod(3n * POSEIDON2_IV_BASE);
   const state = permute([d, sx, sigma, iv]);
-  return [state[0]!, state[1]!];
+  return [state[0]!, state[1]!, state[2]!];
+}
+
+/**
+ * Two-squeeze sponge (`lib.nr::sponge_squeeze_2`): the first two lanes of
+ * {@link spongeSqueeze3} — same absorb, same permutation. Index 0 is the amount
+ * mask, index 1 the randomness mask. Only the recipient-auditor channel
+ * ({@link DOMAIN.AUDITOR_RECIPIENT}) is read two-wide.
+ */
+export function spongeSqueeze2(d: bigint, sx: bigint, sigma: bigint): [bigint, bigint] {
+  const [m0, m1] = spongeSqueeze3(d, sx, sigma);
+  return [m0, m1];
 }
 
 // ---------------------------------------------------------------------------
@@ -101,14 +114,23 @@ export const deriveTransferBlind = (s: bigint, sigma: bigint): bigint =>
  * scalar for any past outgoing transfer from `vk` plus the event's public
  * `sigma`, which is what makes D-sender disclosures work without retaining
  * per-transfer state. Uniqueness comes from `sigma` (fresh per attempt);
- * secrecy from `vk`. Throws on the ~2⁻²⁵⁴-probability zero
- * output (T8/W8 require `r_e ≠ 0`) — resample `sigma` if that ever happens.
+ * secrecy from `vk`. Throws {@link ZeroEphemeralScalarError} on the
+ * ~2⁻²⁵⁴-probability zero output (T8/W8 require `r_e ≠ 0`) — resample `sigma`
+ * if that ever happens.
  */
 export const deriveEphemeralRE = (vk: bigint, sigma: bigint): bigint => {
   const rE = poseidonWithDomain(DOMAIN.EPHEMERAL_KEY, [vk, sigma]);
-  if (rE === 0n) throw new Error("derived r_e is zero — resample sigma");
+  if (rE === 0n) throw new ZeroEphemeralScalarError();
   return rE;
 };
+
+/** {@link deriveEphemeralRE} produced the forbidden `r_e = 0`. */
+export class ZeroEphemeralScalarError extends Error {
+  constructor() {
+    super("derived r_e is zero — resample sigma");
+    this.name = "ZeroEphemeralScalarError";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Encrypted scalars: ciphertext = plaintext + Poseidon2(tag, ...)
@@ -131,29 +153,42 @@ export const encryptEscDvk = (dvk: bigint, s: bigint, opI: bigint): bigint =>
   frAdd(dvk, poseidonWithDomain(DOMAIN.ESCROWED_DELEGATION_VIEWING_KEY, [s, opI]));
 
 /**
- * Sender-auditor balance checkpoint for the single-ciphertext circuits (Withdraw
- * W_a3/W_a4): `b_tilde_aud_s = v_new + sponge_squeeze_2(AUDITOR_SENDER, s, sigma)[1]`.
- *
- * The pad is the sponge's SECOND squeeze — the balance slot every two-ciphertext
- * sender channel uses — not a standalone `poseidonWithDomain` call (what this was
- * before). The first squeeze is reserved for amount masks, so a balance
- * checkpoint never shares a pad with an amount ciphertext even if an
- * `(r_e, sigma)` pair were reused across operations.
+ * Sender-auditor channel ({@link DOMAIN.AUDITOR_SENDER}, read three-wide):
+ * with `m = sponge_squeeze_3(AUDITOR_SENDER, s, sigma)`,
+ * `v_tilde_aud_s = amount + m[0]`, the balance checkpoint
+ * `b_tilde_aud_s = v_new + m[1]`, and the escrow of the new spendable blinding
+ * `r_tilde_aud_s = r_new + m[2]`. Transfer emits all three (T_a6–T_a9);
+ * withdraw only the checkpoint lanes (W_a3–W_a5) — its amount is public. Every
+ * lane adds in-circuit, so mod r (`frAdd`), the blinding escrow included.
  */
-export const encryptAuditorSenderBalance = (
-  vNew: bigint,
-  sAsX: bigint,
+export function encryptAuditorSender(
+  sAs: bigint,
   sigma: bigint,
-): bigint => frAdd(vNew, spongeSqueeze2(DOMAIN.AUDITOR_SENDER, sAsX, sigma)[1]);
+  plain: { amount: bigint; vNew: bigint; rNew: bigint },
+): { vAudS: bigint; bAudS: bigint; rAudS: bigint } {
+  const [m0, m1, m2] = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAs, sigma);
+  return {
+    vAudS: frAdd(plain.amount, m0),
+    bAudS: frAdd(plain.vNew, m1),
+    rAudS: frAdd(plain.rNew, m2),
+  };
+}
 
 /**
- * `v_tilde_disc = v_tx + Poseidon2(DISCLOSURE, s_disc_x, nu)` — the U3 stage
- * of every selective-disclosure circuit. The
- * recipient inverts it with {@link decryptWithDomain} after ECDH-recovering
- * `s_disc_x` from the bundle's `R_disc`.
+ * `r_a_tilde_aud_s = r_a + Poseidon2(ESCROWED_ALLOWANCE_BLINDING_AUDITOR, s_a_s, op_i)`
+ * — the set_spender allowance-blinding escrow to the owner's auditor (S14).
  */
-export const encryptDisclosure = (vTx: bigint, sDiscX: bigint, nu: bigint): bigint =>
-  frAdd(vTx, poseidonWithDomain(DOMAIN.DISCLOSURE, [sDiscX, nu]));
+export const encryptEscAllowRAuditor = (rA: bigint, sAs: bigint, opI: bigint): bigint =>
+  frAdd(rA, poseidonWithDomain(DOMAIN.ESCROWED_ALLOWANCE_BLINDING_AUDITOR, [sAs, opI]));
+
+/**
+ * `v_tilde_disc = v_tx + Poseidon2(DISCLOSURE, s_disc, nu)` — the U3 stage
+ * of every selective-disclosure circuit, where `s_disc = ecdh(r_disc, P_R)`
+ * is the ECDH scalar (U2), not a raw x-coordinate. The recipient inverts it
+ * with {@link decryptWithDomain} after recovering `s_disc = ecdh(r_R, R_disc)`.
+ */
+export const encryptDisclosure = (vTx: bigint, sDisc: bigint, nu: bigint): bigint =>
+  frAdd(vTx, poseidonWithDomain(DOMAIN.DISCLOSURE, [sDisc, nu]));
 
 /**
  * Decrypt a scalar ciphertext: `plaintext = ciphertext - Poseidon2(tag, ...)`.

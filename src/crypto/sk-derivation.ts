@@ -1,13 +1,15 @@
 /**
- * SDK.md §5 — deterministic account-secret derivation.
+ * Deterministic account-secret derivation — stellar-confidential
+ * docs/sdk/key-derivation.md.
  *
- * The protocol's recovery guarantee (DESIGN.md §5.2, INDEXER.md §1) rests on
+ * The protocol's recovery guarantee (docs/protocol/wallet-state.md#recovery,
+ * docs/indexer.md#why-the-indexer-is-load-bearing) rests on
  * `sk` being *derivable*, not stored: given the same root and the same
  * `(contract, account)` pair, every conformant client MUST arrive at the same
  * `sk`, on any device, forever. A client that draws `sk` randomly can never
  * rebuild the account from a seed, whatever history it replays.
  *
- * The chain, verbatim from §5.1:
+ * The chain, verbatim from key-derivation.md#derivation and #signer-roots:
  *
  *   msg  = "openzeppelin/confidential-token/v1/sk" || 0x0a
  *          || enc(contract) || 0x0a || enc(account)
@@ -17,7 +19,8 @@
  *            salt = "openzeppelin/confidential-token/v1/sk",
  *            info = be_32(addr_f) || be_32(acct_f) || le_4(j)))
  *
- * where `RS` is the §4.7 rejection procedure ({@link rejectionSample}) and `j`
+ * where `RS` is the docs/sdk/crypto-core.md#scalar-sampling rejection procedure
+ * ({@link rejectionSample}) and `j`
  * starts at 0, incrementing on every rejection — both when `RS` rejects the
  * candidate and when the induced `vk` would be zero (register constraint R5
  * forbids a zero `vk`, and `vk` is a function of `sk`).
@@ -26,17 +29,19 @@
  * `Y = sk·H` and `vk`'s derivation from `sk`), so every constant below is a
  * cross-client wire contract in the same sense as the domain tags: a client
  * that disagrees on any byte derives a different, wrong-but-usable `sk`, and
- * `register` being single-use makes that unrepairable. The §6.3 chain vector
+ * `register` being single-use makes that unrepairable. The chain vector
+ * docs/sdk/conformance.md#vectors-this-specification-requires asks for
  * (`test/vectors/sk_derivation_chain.json`) pins the whole chain end-to-end.
  *
  * Note the domain string is used TWICE, in two different roles: as the
- * newline-delimited first line of the signed message (§5.2) and as the HKDF
- * salt (§5.1). That is intentional in the spec, not a transcription error.
+ * newline-delimited first line of the signed message (#signer-roots) and as
+ * the HKDF salt (#derivation). That is intentional in the spec, not a transcription error.
  *
  * This layer deliberately does not touch a wallet. The caller obtains the
- * root — a SEP-0053 signature over {@link skSigningMessage} (§5.2) or a raw
- * 32-byte value (§5.3) — and hands it in, keeping the derivation pure.
- * Callers with a signer MUST follow §5.2's obligations that live outside this
+ * root — a SEP-0053 signature over {@link skSigningMessage} (#signer-roots) or
+ * a raw 32-byte value (#raw-roots-and-imported-keys) — and hands it in,
+ * keeping the derivation pure.
+ * Callers with a signer MUST follow #signer-roots' obligations that live outside this
  * function: verify the signature against the expected ed25519 key, obtain it
  * twice to detect non-deterministic signers, and never persist the root.
  */
@@ -49,8 +54,8 @@ import { rejectionSample, toBytes32BE } from "./field.js";
 import { vkFromSk } from "./poseidon2.js";
 
 /**
- * The protocol/deployment domain string, used as the first line of the §5.2
- * signed message AND as the §5.1 HKDF salt.
+ * The protocol/deployment domain string, used as the first line of the
+ * signed message (docs/sdk/key-derivation.md#signer-roots) AND as the HKDF salt (#derivation).
  */
 export const SK_DOMAIN = "openzeppelin/confidential-token/v1/sk";
 
@@ -99,7 +104,7 @@ export function le4(j: number): Uint8Array {
 }
 
 /**
- * The message a §5.2 signer root signs:
+ * The message a signer root (docs/sdk/key-derivation.md#signer-roots) signs:
  * `SK_DOMAIN || 0x0a || enc(contract) || 0x0a || enc(account)`.
  *
  * Carries the full 56-char strkeys (not their `address_to_field` compressions)
@@ -147,20 +152,21 @@ export interface DerivedSecret {
 }
 
 /**
- * Derive `sk` (and the `vk` it implies) from a root, per §5.1.
+ * Derive `sk` (and the `vk` it implies) from a root, per docs/sdk/key-derivation.md#derivation.
  *
  * @param root   the root's bytes verbatim — a 64-byte ed25519 SEP-0053
- *               signature (§5.2) or a raw 32-byte value (§5.3). The IKM is
+ *               signature (#signer-roots) or a raw 32-byte value
+ *               (#raw-roots-and-imported-keys). The IKM is
  *               these bytes as-is; HKDF accepts any length, so only emptiness
  *               is rejected here.
  * @param addrF  `address_to_field(contract)`.
  * @param acctF  `address_to_field(account)` of the address being registered.
  *               Folding it in gives each address a distinct `sk`; reusing one
  *               `sk` across addresses would publish identical `Y`/`PVK` under
- *               both, linking them for any observer (§5.1).
+ *               both, linking them for any observer (#derivation).
  */
 export function deriveSkFromRoot(root: Uint8Array, addrF: bigint, acctF: bigint): DerivedSecret {
-  if (root.length === 0) throw new Error("§5.1 root must not be empty");
+  if (root.length === 0) throw new Error("sk derivation: root must not be empty");
 
   const salt = ascii(SK_DOMAIN);
   const addrBytes = toBytes32BE(addrF);
@@ -177,13 +183,13 @@ export function deriveSkFromRoot(root: Uint8Array, addrF: bigint, acctF: bigint)
   }
 
   throw new Error(
-    `§5.1 derivation found no acceptable sk in ${MAX_REJECTIONS} attempts; ` +
+    `sk derivation found no acceptable sk in ${MAX_REJECTIONS} attempts; ` +
       "the root or the field parameters are almost certainly wrong",
   );
 }
 
 /**
- * Full §5.1 derivation from strkeys: resolves both addresses through
+ * Full docs/sdk/key-derivation.md#derivation from strkeys: resolves both addresses through
  * `address_to_field` and derives the secret. Feed the result's `sk`/`addrF`
  * to `deriveKeys` for the full key set (`Y`, `PVK`).
  */

@@ -96,13 +96,15 @@ export function hexToBytes(h: string): Uint8Array {
 
 /**
  * One deterministic step of the protocol's rejection-sampling procedure
- * (SDK.md §4.7 / the `RS` of the §5.1 `sk` derivation): clear the top **2**
+ * (docs/sdk/crypto-core.md#scalar-sampling / the `RS` of the
+ * docs/sdk/key-derivation.md#derivation `sk` derivation): clear the top **2**
  * bits of a 32-byte big-endian candidate and accept iff the 254-bit result is
  * in `[1, r)` (`[0, r)` with `nonzero: false`). Returns `null` on rejection —
- * the CALLER redraws (§4.7) or increments its counter and re-derives (§5.1).
+ * the CALLER redraws (#scalar-sampling) or increments its counter and
+ * re-derives (#derivation).
  *
  * Masking more than 2 bits would still land `< r` — but it would silently
- * shrink the range instead of rejecting, and §5.1 feeds this procedure HKDF
+ * shrink the range instead of rejecting, and #derivation feeds this procedure HKDF
  * output rather than CSPRNG bytes, so a client that masks a different number
  * of bits derives a DIFFERENT `sk` from the same root. The bit count is a
  * cross-client contract, not a local bias-reduction choice.

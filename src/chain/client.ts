@@ -19,9 +19,13 @@ import {
 } from "@stellar/stellar-sdk";
 
 import { pointFromBytes, type Point } from "../crypto/grumpkin.js";
+import { parseContractErrorCode } from "./errors.js";
 
 /** Source used for read-only simulation; never signs, never pays. */
 const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/** `ConfidentialTokenError::AccountNotRegistered` — `confidential_balance` on an unknown account. */
+const ACCOUNT_NOT_REGISTERED = 3501;
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 60;
@@ -65,6 +69,22 @@ export interface OnChainAccount {
   auditorId: number;
 }
 
+/**
+ * The RPC rejected a simulation (a contract panic, a host or storage error).
+ * The message keeps the `simulate <method> failed: <host error>` form that
+ * `humanizeContractError` parses; `latestLedger` is the ledger it ran against.
+ */
+export class SimulationFailedError extends Error {
+  constructor(
+    method: string,
+    hostError: string,
+    readonly latestLedger: number,
+  ) {
+    super(`simulate ${method} failed: ${hostError}`);
+    this.name = "SimulationFailedError";
+  }
+}
+
 export function keypairSigner(secret: string, networkPassphrase: string): Signer {
   const kp = Keypair.fromSecret(secret);
   return {
@@ -90,6 +110,20 @@ export class ChainClient {
 
   /** Simulate a read-only call and return its raw `ScVal` result. */
   async simulate(contractId: string, method: string, args: xdr.ScVal[]): Promise<xdr.ScVal> {
+    return (await this.simulateAt(contractId, method, args)).retval;
+  }
+
+  /**
+   * {@link simulate}, plus the ledger the simulation ran against (the
+   * response's `latestLedger`) — for reads that are compared with an event
+   * fetch through a given ledger. A rejected simulation throws a
+   * {@link SimulationFailedError} carrying that ledger too.
+   */
+  async simulateAt(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+  ): Promise<{ retval: xdr.ScVal; latestLedger: number }> {
     const account = await this.server
       .getAccount(NULL_ACCOUNT)
       .catch(() => new Account(NULL_ACCOUNT, "0"));
@@ -103,31 +137,48 @@ export class ChainClient {
 
     const sim = await this.server.simulateTransaction(tx);
     if (rpc.Api.isSimulationError(sim)) {
-      throw new Error(`simulate ${method} failed: ${sim.error}`);
+      throw new SimulationFailedError(method, sim.error, sim.latestLedger);
     }
     const ok = sim as rpc.Api.SimulateTransactionSuccessResponse;
     if (!ok.result) throw new Error(`simulate ${method}: no result`);
-    return ok.result.retval;
+    return { retval: ok.result.retval, latestLedger: ok.latestLedger };
   }
 
   /**
    * Read a confidential account, or `null` if `address` is not registered.
    *
-   * Only the simulate call is treated as "not registered" (the contract panics
-   * with `AccountNotRegistered`). A {@link parseAccount} failure is a real
-   * SDK/contract mismatch and propagates — swallowing it here would report every
-   * account as unregistered after a contract-side field rename.
+   * Only the contract's `AccountNotRegistered` panic means "not registered".
+   * Every other simulate failure (transport, rate limit, an archived entry,
+   * any other contract error) propagates: reporting it as `null` would make an
+   * unreachable chain look like an empty account, and the state engine's
+   * consistency check would then call a healthy local state diverged. A
+   * {@link parseAccount} failure is a real SDK/contract mismatch and propagates
+   * too — swallowing it would report every account as unregistered after a
+   * contract-side field rename.
    */
   async confidentialBalance(address: string): Promise<OnChainAccount | null> {
-    let retval: xdr.ScVal;
+    return (await this.confidentialBalanceAt(address)).account;
+  }
+
+  /**
+   * {@link confidentialBalance}, plus the ledger the read ran against — what
+   * `StateEngine` compares with the ledger its events were fetched through.
+   */
+  async confidentialBalanceAt(
+    address: string,
+  ): Promise<{ account: OnChainAccount | null; latestLedger: number }> {
+    let read: { retval: xdr.ScVal; latestLedger: number };
     try {
-      retval = await this.simulate(this.cfg.contracts.token, "confidential_balance", [
+      read = await this.simulateAt(this.cfg.contracts.token, "confidential_balance", [
         new Address(address).toScVal(),
       ]);
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof SimulationFailedError && parseContractErrorCode(e.message) === ACCOUNT_NOT_REGISTERED) {
+        return { account: null, latestLedger: e.latestLedger };
+      }
+      throw e;
     }
-    return parseAccount(retval);
+    return { account: parseAccount(read.retval), latestLedger: read.latestLedger };
   }
 
   async isRegistered(address: string): Promise<boolean> {

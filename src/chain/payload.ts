@@ -9,6 +9,8 @@
  *   - `Point = BytesN<64>` is a FLAT 64-byte value (`be(x) || be(y)`), NOT an
  *     `{ x, y }` sub-map (that was the previous design).
  *   - `BytesN<32>` fields are 32-byte values; `proof` is variable `Bytes`.
+ *   - Every field is required: a missing or misnamed key fails `from_xdr`,
+ *     which the contract reports as `InvalidData` (3507), not as a proof error.
  *
  * The `data` argument itself is `Bytes`, so the wire value is
  * `scvBytes( ScVal(<XDR of the {payload, proof} map>) )`.
@@ -61,8 +63,18 @@ export function encodeWithdrawData(w: WithdrawWitness, proof: Uint8Array): xdr.S
     r_e_point: pointVal(p.rE),
     sigma: fieldVal(p.sigma),
     b_tilde_aud_s: fieldVal(p.bAudS),
+    r_tilde_aud_s: fieldVal(p.rAudS),
   });
   return envelope(payload, proof);
+}
+
+/**
+ * `ClawbackData { proof }`: the clawback circuit has no prover-supplied public
+ * inputs (the contract rebuilds all eleven from state and arguments), so the
+ * envelope carries the proof alone.
+ */
+export function encodeClawbackData(proof: Uint8Array): xdr.ScVal {
+  return scvBytes(scvStruct({ proof: scvBytes(proof) }).toXDR());
 }
 
 export function encodeTransferData(w: TransferWitness, proof: Uint8Array): xdr.ScVal {
@@ -78,6 +90,7 @@ export function encodeTransferData(w: TransferWitness, proof: Uint8Array): xdr.S
     r_tilde_aud_r: fieldVal(p.rAudR),
     v_tilde_aud_s: fieldVal(p.vAudS),
     b_tilde_aud_s: fieldVal(p.bAudS),
+    r_tilde_aud_s: fieldVal(p.rAudS),
   });
   return envelope(payload, proof);
 }

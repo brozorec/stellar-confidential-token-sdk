@@ -3,7 +3,8 @@
 //   1. Simulate the on-chain side: a real transfer witness produces the event
 //      fields (R_e, sigma, v_tilde) exactly as the contract would emit them.
 //   2. Holder side: build the disclosure witness, prove with the shared
-//      committed disclosure artifact (UltraHonk, keccak transcript).
+//      committed disclosure artifact (UltraHonk, keccak transcript, ZK
+//      flavour).
 //   3. Receiver side: reconstruct the public-input vector the way
 //      disclosure/verify.ts does (from "chain" values + own (P_R, ν), taking
 //      only (R_disc, ṽ_disc) from the bundle), verify, decrypt, and check the
@@ -33,7 +34,8 @@ import {
   pointFromJson,
 } from "../src/disclosure/recipient.ts";
 import { buildDiscloseRecipientWitness } from "../src/witness/disclose-recipient.ts";
-import { buildDiscloseSenderWitness } from "../src/witness/disclose-sender.ts";
+import { buildDiscloseSenderWitness, NotDisclosableError } from "../src/witness/disclose-sender.ts";
+import { verifyDisclosure, DisclosureVerifyError } from "../src/disclosure/verify.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const artifactsDir = join(here, "..", "circuits", "disclosure");
@@ -85,7 +87,7 @@ const w = buildDiscloseRecipientWitness({
 });
 check(w.vTx === AMOUNT, `witness decrypts the event amount in-circuit-shape (${w.vTx})`);
 
-const prover = new CircuitProver(circuit);
+const prover = new CircuitProver(circuit, { zk: true });
 const t0 = performance.now();
 const { proof, publicInputs } = await prover.prove(w.inputs);
 console.log(
@@ -99,6 +101,7 @@ check(
   Buffer.from(vk).toString("base64") === vkJson.vkBase64,
   "VK derived from circuit bytecode matches the pinned circuits/disclosure/disclose_recipient.vk.json",
 );
+check(vkJson.zk === true && senderVkJson.zk === true, "VK pins record the ZK flavour");
 
 // Public inputs rebuilt the receiver-protocol way (chain values + own (P_R, ν) + the
 // bundle's R_disc / ṽ_disc) — byte-equal to what bb.js extracted.
@@ -151,6 +154,40 @@ await tamper("rejects binding to a different event (R_e swap)", (pi) => {
 const wrong = decryptDisclosure(randomScalar(), w.rDisc, w.vTildeDisc, fromHex(request.nu));
 check(wrong !== AMOUNT, "wrong recipient secret does not recover the amount");
 
+// Flavour: the VK is identical across flavours, so only the verify itself can
+// catch a non-ZK proof — it must fail closed.
+const nonZk = new CircuitProver(circuit);
+const nonZkProof = await nonZk.prove(w.inputs);
+check(!(await prover.verify({ proof: nonZkProof.proof, publicInputs: rebuilt })), "a non-ZK proof does not verify as a disclosure proof");
+check(
+  Buffer.from(await nonZk.verificationKey()).toString("base64") === vkJson.vkBase64,
+  "(VK bytes are flavour-independent — which is why the pin cannot enforce ZK)",
+);
+
+// verifyDisclosure's vk-pinning stage runs before any chain access.
+const stageOf = async (overrides) => {
+  try {
+    await verifyDisclosure({
+      client: {},
+      bundle: { circuitId: "disclose_recipient", refE: { ledger: 1, id: "x" }, proof: "0x", rDisc: request.pR, vTildeDisc: "0x01" },
+      request,
+      keys: receiver,
+      prover,
+      pinnedVk: Buffer.from(vkJson.vkBase64, "base64"),
+      ...overrides,
+    });
+  } catch (e) {
+    return e instanceof DisclosureVerifyError ? e.stage : `untyped: ${e.message}`;
+  }
+  return "accepted";
+};
+check((await stageOf({ prover: nonZk })) === "vk-pinning", "verifyDisclosure rejects a non-ZK prover at vk-pinning");
+check(
+  (await stageOf({ pinnedVk: Buffer.from(senderVkJson.vkBase64, "base64") })) === "vk-pinning",
+  "verifyDisclosure rejects a mismatched pinned VK at vk-pinning",
+);
+
+await nonZk.destroy();
 await prover.destroy();
 
 // --- 5. D-sender: the originator proves the same event from their side ------
@@ -158,26 +195,24 @@ console.log("\nD-sender:");
 const senderReceiver = generateRecipientKeys();
 const senderRequest = newDisclosureRequest(senderReceiver);
 
-// The retained scalar must match the event's R_e — a stale one is rejected
-// before proving.
-let threw = false;
+// Only the originator re-derives the event's r_e; anyone else gets the typed
+// not-disclosable outcome before proving.
+let notDisclosable = false;
 try {
   buildDiscloseSenderWitness({
-    keys: sender,
-    rEScalar: randomScalar(),
+    keys: holder,
     event,
     pvkB: holder.PVK,
     pR: pointFromJson(senderRequest.pR),
     nu: fromHex(senderRequest.nu),
   });
-} catch {
-  threw = true;
+} catch (e) {
+  notDisclosable = e instanceof NotDisclosableError;
 }
-check(threw, "witness builder rejects a stale/mismatched retained r_e");
+check(notDisclosable, "non-originator keys: NotDisclosableError, not a proving error");
 
 const sw = buildDiscloseSenderWitness({
   keys: sender,
-  rEScalar: tw.rEScalar,
   event,
   pvkB: holder.PVK,
   pR: pointFromJson(senderRequest.pR),
@@ -185,7 +220,7 @@ const sw = buildDiscloseSenderWitness({
 });
 check(sw.vTx === AMOUNT, `sender witness reconstructs the event amount (${sw.vTx})`);
 
-const senderProver = new CircuitProver(senderCircuit);
+const senderProver = new CircuitProver(senderCircuit, { zk: true });
 const t1 = performance.now();
 const sp = await senderProver.prove(sw.inputs);
 console.log(

@@ -216,7 +216,41 @@ function dataMap(value: unknown): EventDataAccessor {
     point: (name) => pointFromBytes(padTo(scvBytes(get(name)), 64)),
     i128: (name) => scvI128(get(name)),
     u32: (name) => scvU32(get(name)),
+    bool: (name) => scvBool(get(name)),
+    address: (name) => {
+      const a = scvString(get(name));
+      if (!a) throw new Error(`indexer event data field "${name}" is not an address`);
+      return a;
+    },
+    // soroban-sdk 28 omits a None Option field; tolerate an explicit void too.
+    isNone: (name) => !(name in byName) || scvIsVoid(byName[name]),
   };
+}
+
+/**
+ * True for a JSON-encoded `Void` ScVal (`null`, `"void"`, `{ void: … }`, or
+ * the `{ type: "void" }` form whose siblings carry their payload in `value`).
+ */
+function scvIsVoid(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.toLowerCase() === "void";
+  const rec = asRecord(value);
+  if (rec === null) return false;
+  return "void" in rec || (typeof rec.type === "string" && rec.type.toLowerCase() === "void");
+}
+
+/** Extract a bool ScVal (`true`, `{ bool: true }`, or `"true"`). */
+function scvBool(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === "true" || value === "false") return value === "true";
+  const rec = asRecord(value);
+  if (rec) {
+    for (const key of ["bool", "b", "value"]) {
+      const v = rec[key];
+      if (typeof v === "boolean") return v;
+    }
+  }
+  throw new Error("expected a bool ScVal");
 }
 
 function normalizeJson(value: unknown): unknown {

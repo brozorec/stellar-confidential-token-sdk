@@ -1,0 +1,2 @@
+[workspace]
+members = ["disclose_recipient", "disclose_sender"]
