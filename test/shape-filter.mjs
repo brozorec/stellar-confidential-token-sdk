@@ -63,7 +63,7 @@ function check(name, cond, detail) {
   }
 }
 
-// Compliance (token_with_compliance) + policy (allowlist/blocklist) membership
+// Compliance (compliant token) + policy (allowlist/blocklist-style) membership
 // events: all share the [symbol, account] empty-data shape.
 const COMPLIANCE = new Set([
   "frozen",

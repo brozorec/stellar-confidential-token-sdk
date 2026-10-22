@@ -109,7 +109,7 @@ function canon(expected) {
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const files = readdirSync(FIXTURE_DIR).filter((f) => f.endsWith(".json")).sort();
-console.log(`fixtures (§6.1): ${files.length} file(s) in test/fixtures/`);
+console.log(`fixtures (primitive-fixtures): ${files.length} file(s) in test/fixtures/`);
 ok(files.length > 0, "vendored fixtures present (suite would be vacuous without them)");
 
 for (const file of files) {

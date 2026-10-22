@@ -20,7 +20,11 @@ import type { TransferEvent } from "../chain/events.js";
 import { eventRef } from "../chain/events.js";
 import type { CircuitProver } from "../proving/prover.js";
 import { buildDiscloseRecipientWitness } from "../witness/disclose-recipient.js";
-import { buildDiscloseSenderWitness, senderEphemeralScalar } from "../witness/disclose-sender.js";
+import {
+  buildDiscloseSenderWitness,
+  NotDisclosableError,
+  type DiscloseSenderWitness,
+} from "../witness/disclose-sender.js";
 import {
   DISCLOSE_RECIPIENT_CIRCUIT_ID,
   DISCLOSE_SENDER_CIRCUIT_ID,
@@ -39,7 +43,7 @@ import { pointFromJson, pointToJson } from "./recipient.js";
  */
 export type SenderDisclosureOutcome =
   | { disclosable: true; bundle: DisclosureBundle }
-  | { disclosable: false; reason: "ephemeral-scalar-mismatch" };
+  | { disclosable: false; reason: NotDisclosableError["reason"] };
 
 export async function proveRecipientDisclosure(params: {
   /** Holder's key set — must be the event's `to` account. */
@@ -77,17 +81,21 @@ export async function proveSenderDisclosure(params: {
 }): Promise<SenderDisclosureOutcome> {
   const { keys, event, pvkB, request, prover } = params;
   requireZk(prover, DISCLOSE_SENDER_CIRCUIT_ID);
-  // Establish disclosability before any witness work (and before proving).
-  if (senderEphemeralScalar(keys, event) === null) {
-    return { disclosable: false, reason: "ephemeral-scalar-mismatch" };
+  // The builder establishes disclosability first, so a non-disclosable event
+  // never reaches the prover.
+  let w: DiscloseSenderWitness;
+  try {
+    w = buildDiscloseSenderWitness({
+      keys,
+      event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
+      pvkB,
+      pR: pointFromJson(request.pR),
+      nu: fromHex(request.nu),
+    });
+  } catch (e) {
+    if (e instanceof NotDisclosableError) return { disclosable: false, reason: e.reason };
+    throw e;
   }
-  const w = buildDiscloseSenderWitness({
-    keys,
-    event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
-    pvkB,
-    pR: pointFromJson(request.pR),
-    nu: fromHex(request.nu),
-  });
   const { proof } = await prover.prove(w.inputs);
   return { disclosable: true, bundle: bundle(DISCLOSE_SENDER_CIRCUIT_ID, event, proof, w) };
 }

@@ -227,12 +227,16 @@ function dataMap(value: unknown): EventDataAccessor {
   };
 }
 
-/** True for a JSON-encoded `Void` ScVal (`null`, `"void"`, or `{ void: … }`). */
+/**
+ * True for a JSON-encoded `Void` ScVal (`null`, `"void"`, `{ void: … }`, or
+ * the `{ type: "void" }` form whose siblings carry their payload in `value`).
+ */
 function scvIsVoid(value: unknown): boolean {
   if (value === null || value === undefined) return true;
   if (typeof value === "string") return value.toLowerCase() === "void";
   const rec = asRecord(value);
-  return rec !== null && "void" in rec;
+  if (rec === null) return false;
+  return "void" in rec || (typeof rec.type === "string" && rec.type.toLowerCase() === "void");
 }
 
 /** Extract a bool ScVal (`true`, `{ bool: true }`, or `"true"`). */

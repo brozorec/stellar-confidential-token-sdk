@@ -46,8 +46,11 @@ partial coverage is conformant only if it is stated.
   compiled circuits.
 - **Holder wallet state**: replay of every event that changes a balance,
   including those a holder cannot prove (merges, `revoke_spender`,
-  `set_spender`, `spender_transfer` credits, `clawback`), with an on-chain
-  consistency check after every sync and before every proof.
+  `set_spender`, `spender_transfer` credits, `clawback`). Every sync ends
+  with an on-chain consistency check. The check before a proof is
+  `StateEngine.spendableForProof()`: the witness builders take a raw `(v, r)`
+  and cannot check it, so an integrator must take the spendable opening from
+  `spendableForProof()`.
 - **Selective disclosure**: D-recipient and D-sender, on `Transfer` events
   only. The circuits are built here from upstream's specification.
 
@@ -187,10 +190,16 @@ source:
   configure an indexer.
 
 Every `StateEngine.sync()` ends by re-committing the local openings and
-checking them against the on-chain commitments; a mismatch throws a
+checking them against the on-chain commitments; a mismatch with the balance
+read at the ledger the events were fetched through throws a
 `StateDivergedError` that names the diverged accumulator, so divergence is
-detected, never silently spent. `StateEngine.spendableForProof()` repeats the
-check immediately before a proof is built and returns the verified opening.
+detected, never silently spent. A mismatching read at another ledger is
+re-synced or re-read first; if the two never line up, the sync throws
+`StateUnverifiedError` (retry — it is not a divergence). `StateEngine.spendableForProof()` repeats the
+check against the current chain and returns the verified spendable opening.
+Build every withdraw and transfer witness from it, not from `current()` or a
+cached copy: the witness builders take whatever `(v, r)` they are given, so
+this call is the only check before a proof.
 
 ## License
 

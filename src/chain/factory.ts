@@ -26,21 +26,29 @@ import { scvStruct } from "./payload.js";
 
 const addr = (a: string): xdr.ScVal => new Address(a).toScVal();
 const u32 = (n: number): xdr.ScVal => xdr.ScVal.scvU32(n);
+/**
+ * `Option<Address>`: only `null`/`undefined` → Void. Any string, `""`
+ * included, is encoded as an address and throws if it is not one — an empty
+ * form field must not silently become None.
+ */
+export const optionAddr = (a: string | null | undefined): xdr.ScVal =>
+  a == null ? xdr.ScVal.scvVoid() : addr(a);
 
 /**
  * `stellar_confidential::compliance::ComplianceConfig`: the token's optional
- * external policy, and whether every gate also consults the underlying SAC's
- * `authorized` view (traps unless the underlying IS a Stellar Asset Contract).
+ * external policy (`null` = None), and whether every gate also consults the
+ * underlying SAC's `authorized` view (traps unless the underlying IS a Stellar
+ * Asset Contract). Decoded by `decodeComplianceConfig` (events.ts).
  */
 export interface ComplianceConfig {
-  policy?: string;
+  policy: string | null;
   sacPassthrough: boolean;
 }
 
 /** `ComplianceConfig` as its contracttype ScMap (`policy: None` → Void). */
 export function complianceConfigVal(c: ComplianceConfig): xdr.ScVal {
   return scvStruct({
-    policy: c.policy ? addr(c.policy) : xdr.ScVal.scvVoid(),
+    policy: optionAddr(c.policy),
     sac_passthrough: xdr.ScVal.scvBool(c.sacPassthrough),
   });
 }
@@ -74,6 +82,12 @@ const tokenArgs = (w: FactoryWiring, admin: string, compliance: ComplianceConfig
   u32(salt),
 ];
 
+const allowlistArgs = (admin: string, manager: string, salt: number) => [
+  addr(admin),
+  addr(manager),
+  u32(salt),
+];
+
 /**
  * `deploy_token(admin, underlying_asset, verifier, auditor, compliance, salt)`
  * → compliant token address. The token grants no role at construction: the
@@ -101,12 +115,7 @@ export async function deployAllowlist(
   manager: string,
   salt: number = randomSalt(),
 ): Promise<string> {
-  const r = await client.invoke(
-    factory,
-    "deploy_allowlist",
-    [addr(admin), addr(manager), u32(salt)],
-    signer,
-  );
+  const r = await client.invoke(factory, "deploy_allowlist", allowlistArgs(admin, manager, salt), signer);
   return requireAddr(r.returnValue, "deploy_allowlist");
 }
 
@@ -179,7 +188,7 @@ export async function predictAllowlistAddress(
   salt: number,
 ): Promise<string> {
   return requireAddr(
-    await client.simulate(factory, "predict_allowlist_address", [addr(admin), addr(manager), u32(salt)]),
+    await client.simulate(factory, "predict_allowlist_address", allowlistArgs(admin, manager, salt)),
     "predict_allowlist_address",
   );
 }

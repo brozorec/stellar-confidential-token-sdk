@@ -25,7 +25,8 @@
 import { xdr, Address, nativeToScVal, scValToNative } from "@stellar/stellar-sdk";
 
 import type { ChainClient, Signer, InvokeResult } from "./client.js";
-import { complianceConfigVal, type ComplianceConfig } from "./factory.js";
+import { decodeComplianceConfig } from "./events.js";
+import { complianceConfigVal, optionAddr, type ComplianceConfig } from "./factory.js";
 import { encodeClawbackData } from "./payload.js";
 
 const addr = (a: string): xdr.ScVal => new Address(a).toScVal();
@@ -75,15 +76,7 @@ export async function readComplianceConfig(
   tokenId: string,
 ): Promise<ComplianceConfig | null> {
   const rv = await client.simulate(tokenId, "compliance_config", []);
-  if (isVoid(rv)) return null;
-  const m = new Map((rv.map() ?? []).map((e) => [e.key().sym().toString(), e.val()]));
-  const policy = m.get("policy");
-  const sac = m.get("sac_passthrough");
-  if (sac === undefined) throw new Error("ComplianceConfig is missing sac_passthrough");
-  return {
-    ...(policy && !isVoid(policy) ? { policy: Address.fromScVal(policy).toString() } : {}),
-    sacPassthrough: sac.b(),
-  };
+  return isVoid(rv) ? null : decodeComplianceConfig(rv);
 }
 
 /**
@@ -209,7 +202,7 @@ export function clawback(
     [
       addr(account),
       nativeToScVal(amount, { type: "i128" }),
-      destination ? addr(destination) : xdr.ScVal.scvVoid(),
+      optionAddr(destination),
       encodeClawbackData(proof),
       addr(operator),
     ],

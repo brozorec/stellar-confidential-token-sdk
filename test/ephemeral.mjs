@@ -120,5 +120,24 @@ ok(
 const wwRand = buildWithdrawWitness({ keys: sender, v, r, amount: 400n, kAudS: kAud, rE: 31337n });
 ok(scalarMul(31337n, H).equals(wwRand.payload.rE), "withdraw explicit p.rE override respected");
 
+// Only the zero derivation maps to "not disclosable"; a malformed key or
+// sigma is a caller bug and must surface, not read as a disclosure outcome.
+const throwsTypeError = (fn) => {
+  try {
+    fn();
+    return false;
+  } catch (e) {
+    return e instanceof TypeError;
+  }
+};
+ok(
+  throwsTypeError(() => senderEphemeralScalar({ ...sender, vk: undefined }, { rE: tw.payload.rE, sigma: tw.payload.sigma })),
+  "senderEphemeralScalar: missing vk throws, not null",
+);
+ok(
+  throwsTypeError(() => senderEphemeralScalar(sender, { rE: tw.payload.rE, sigma: undefined })),
+  "senderEphemeralScalar: missing sigma throws, not null",
+);
+
 console.log(`\nephemeral: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

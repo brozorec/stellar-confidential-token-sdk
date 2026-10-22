@@ -26,6 +26,7 @@ import { xdr, Address, scValToNative, rpc } from "@stellar/stellar-sdk";
 import { fromBytesBE, toHex32 } from "../crypto/field.js";
 import { pointFromBytes, pointCoords, type Point } from "../crypto/grumpkin.js";
 import type { ChainClient } from "./client.js";
+import type { ComplianceConfig } from "./factory.js";
 
 export type ConfidentialEventType =
   | "register"
@@ -188,10 +189,8 @@ export interface ClawbackEvent extends BaseEvent {
 }
 
 /** `compliance_config_changed`: no topics beyond the name; no balance effect. */
-export interface ComplianceConfigChangedEvent extends BaseEvent {
+export interface ComplianceConfigChangedEvent extends BaseEvent, ComplianceConfig {
   type: "compliance_config_changed";
-  policy: string | null;
-  sacPassthrough: boolean;
 }
 
 /** A compliance/policy membership event ({@link ComplianceEventType}). */
@@ -356,12 +355,7 @@ export function buildConfidentialEvent(
       };
     case "compliance_config_changed":
       // No account topic: must not go through the addr(1) branch below.
-      return {
-        ...base,
-        type: "compliance_config_changed",
-        policy: data.isNone("policy") ? null : data.address("policy"),
-        sacPassthrough: data.bool("sac_passthrough"),
-      };
+      return { ...base, type: "compliance_config_changed", ...complianceConfigFrom(data) };
     case "frozen":
     case "unfrozen":
     case "user_allowed":
@@ -560,6 +554,37 @@ function parseEvent(ev: rpc.Api.EventResponse): ConfidentialEvent | null {
   };
   const addr = (i: number): string => Address.fromScVal(topics[i]!).toString();
   return buildConfidentialEvent(name, base, addr, dataMap(ev.value));
+}
+
+/**
+ * `ComplianceConfig` from its contracttype map, shared by the event and the
+ * `compliance_config()` read. Tolerates an absent `policy` (the event omits
+ * `None`); {@link decodeComplianceConfig} checks completeness first.
+ */
+function complianceConfigFrom(data: EventDataAccessor): ComplianceConfig {
+  return {
+    policy: data.isNone("policy") ? null : data.address("policy"),
+    sacPassthrough: data.bool("sac_passthrough"),
+  };
+}
+
+/**
+ * Decode a `ComplianceConfig` contracttype value (the `Some` payload of
+ * `compliance_config()`). Unlike an event, a contracttype struct writes a
+ * `None` field as `Void` rather than omitting it, so every field must be
+ * present: a missing key is a contract-side rename and throws, instead of
+ * reading as "no policy".
+ */
+export function decodeComplianceConfig(value: xdr.ScVal): ComplianceConfig {
+  const keys = (value.map() ?? []).map((e) => e.key().sym().toString());
+  const missing = ["policy", "sac_passthrough"].filter((k) => !keys.includes(k));
+  if (missing.length > 0) {
+    throw new Error(
+      `ComplianceConfig is missing ${missing.join(", ")} — the contract's field names ` +
+        `(${keys.join(", ")}) do not match this SDK build`,
+    );
+  }
+  return complianceConfigFrom(dataMap(value));
 }
 
 /** XDR-backed {@link EventDataAccessor} over a Map-format event's data `ScMap`. */

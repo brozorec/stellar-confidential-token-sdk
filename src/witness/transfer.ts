@@ -18,16 +18,20 @@ import {
   deriveSpendR,
   deriveTransferBlind,
   encryptAmount,
+  encryptAuditorSender,
   encryptBalance,
   spongeSqueeze2,
-  spongeSqueeze3,
 } from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 export interface TransferParams {
   /** Sender's contract-bound key set. */
   keys: KeyPair;
-  /** Sender's current spendable plaintext / blinding. */
+  /**
+   * Sender's current spendable plaintext / blinding. Take them from
+   * `StateEngine.spendableForProof()`, which checks them against on-chain
+   * C_spend; this builder does not.
+   */
   v: bigint;
   r: bigint;
   /** Confidential transfer amount `v_transfer` (0 ≤ v_transfer ≤ v). */
@@ -67,11 +71,10 @@ export interface TransferWitness {
    */
   recipientView: { vTransfer: bigint; rTransfer: bigint; cTransfer: Point };
   /**
-   * The ephemeral SCALAR `r_e` for this transfer — the witness that lets the
-   * sender later prove what the event ciphertext contains (D-sender).
-   * Derived as
-   * `Poseidon2(EPHEMERAL_KEY, vk, sigma)`, so the sender can recompute it
-   * from `vk` + the event's public `sigma` at any time — nothing to retain.
+   * The ephemeral SCALAR `r_e` used for this transfer. Exposed for
+   * inspection and tests only: D-sender re-derives it as
+   * `Poseidon2(EPHEMERAL_KEY, vk, sigma)` from `vk` + the event's public
+   * `sigma` (`senderEphemeralScalar`), so there is nothing to retain.
    */
   rEScalar: bigint;
 }
@@ -108,13 +111,10 @@ export function buildTransferWitness(p: TransferParams): TransferWitness {
   const vAudR = frAdd(amount, mR[0]);
   const rAudR = frAdd(rTransfer, mR[1]);
 
-  // Sender-auditor channel, three-wide (T_a6): amount mask, balance-checkpoint
-  // mask, then the escrow of the new spendable blinding r_A' (T_a9).
+  // Sender-auditor channel (T_a6–T_a9): amount, balance checkpoint, and the
+  // escrow of the new spendable blinding r_A'.
   const sAsX = ecdh(rE, kAudS);
-  const mS = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
-  const vAudS = frAdd(amount, mS[0]);
-  const bAudS = frAdd(vNew, mS[1]);
-  const rAudS = frAdd(rNew, mS[2]);
+  const { vAudS, bAudS, rAudS } = encryptAuditorSender(sAsX, sigma, { amount, vNew, rNew });
 
   const inputs: NoirInputs = {
     sk: fieldIn(keys.sk),

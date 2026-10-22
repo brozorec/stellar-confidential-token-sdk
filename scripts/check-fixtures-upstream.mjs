@@ -1,4 +1,5 @@
-// Verify the vendored §6.1 fixtures (test/fixtures/) are byte-identical to
+// Verify the vendored primitive fixtures (test/fixtures/;
+// docs/sdk/conformance.md#primitive-fixtures) are byte-identical to
 // OpenZeppelin's packages/confidential/circuits/lib/testdata on `main` (or on
 // the ref in $UPSTREAM_REF), and that upstream has grown no fixture we haven't
 // vendored.

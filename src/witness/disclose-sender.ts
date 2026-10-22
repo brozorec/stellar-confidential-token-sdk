@@ -16,7 +16,12 @@ import type { KeyPair } from "../crypto/keys.js";
 import { H, scalarMul, ecdh, type Point } from "../crypto/grumpkin.js";
 import { randomScalar } from "../crypto/field.js";
 import { DOMAIN } from "../crypto/constants.js";
-import { decryptWithDomain, deriveEphemeralRE, encryptDisclosure } from "../crypto/poseidon2.js";
+import {
+  decryptWithDomain,
+  deriveEphemeralRE,
+  encryptDisclosure,
+  ZeroEphemeralScalarError,
+} from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 /** The per-event fields of the on-chain `Transfer` being disclosed. */
@@ -81,9 +86,11 @@ export function senderEphemeralScalar(
   let rE: bigint;
   try {
     rE = deriveEphemeralRE(keys.vk, event.sigma);
-  } catch {
-    // A zero derivation (~2^-254) can never match a valid R_e.
-    return null;
+  } catch (e) {
+    // A zero derivation (~2^-254) can never match a valid R_e. Anything else
+    // (a malformed key or sigma) is a caller bug, not an outcome.
+    if (e instanceof ZeroEphemeralScalarError) return null;
+    throw e;
   }
   return scalarMul(rE, H).equals(event.rE) ? rE : null;
 }

@@ -84,6 +84,7 @@ export class CircuitProver {
   readonly #bytecode: string;
   readonly #flavour: typeof KECCAK | typeof KECCAK_ZK;
   #backend?: UltraHonkBackend;
+  #vk?: Uint8Array;
   /** Whether this prover uses the ZK flavour ({@link CircuitProverOptions.zk}). */
   readonly zk: boolean;
 
@@ -123,11 +124,15 @@ export class CircuitProver {
    * Derive this circuit's verification key (keccak transcript). Off-chain
    * disclosure verifiers compare these bytes against the pinned VK shipped in
    * `circuits/disclosure/` before trusting a verify result — the VK is the
-   * cryptographic fingerprint of the circuit.
+   * cryptographic fingerprint of the circuit. Derived once per prover (it
+   * depends only on the bytecode and flavour); each call returns a copy.
    */
   async verificationKey(): Promise<Uint8Array> {
-    const backend = await this.#backendInstance();
-    return backend.getVerificationKey(this.#flavour);
+    if (!this.#vk) {
+      const backend = await this.#backendInstance();
+      this.#vk = await backend.getVerificationKey(this.#flavour);
+    }
+    return this.#vk.slice();
   }
 
   async destroy(): Promise<void> {

@@ -287,13 +287,16 @@ async function expectSync(who, engine) {
   return s instanceof Error ? null : s;
 }
 
+/** Thrown by step() after it has recorded the failure, so the outer catch doesn't count it twice. */
+class StepFailed extends Error {}
+
 async function step(name, fn) {
   try {
     await fn();
     check(`${name} accepted on-chain`, true);
   } catch (e) {
     check(`${name} accepted on-chain`, false, String(e?.message ?? e).split("\n")[0]);
-    throw e;
+    throw new StepFailed(name, { cause: e });
   }
 }
 
@@ -461,10 +464,10 @@ try {
 
   console.log("\ncompliance config + unfreeze:");
   await step("set_compliance_config (policy None)", () =>
-    setComplianceConfig(client, adminSigner, token, { sacPassthrough: false }, ADMIN),
+    setComplianceConfig(client, adminSigner, token, { policy: null, sacPassthrough: false }, ADMIN),
   );
   const cfg = await readComplianceConfig(client, token);
-  check("compliance config read back without a policy", cfg && cfg.policy === undefined && cfg.sacPassthrough === false);
+  check("compliance config read back without a policy", cfg && cfg.policy === null && cfg.sacPassthrough === false);
   // The constructor emits the first one (policy = the allowlist); the
   // rotation above emits the second, with policy None left out of the map.
   const cfgEvs = (await fetchEvents(client, { startLedger: fromLedger })).events.filter(
@@ -478,8 +481,13 @@ try {
   );
   await step("unfreeze alice", () => unfreezeAccount(client, adminSigner, token, A, ADMIN));
   check("alice no longer frozen", !(await isFrozen(client, token, A)));
-} catch {
+} catch (e) {
   // A failed step already recorded its failure; the rest depends on it.
+  // Anything else (witness build, prove, a sync or event read outside a step)
+  // is a failure no check() has seen yet.
+  if (!(e instanceof StepFailed)) {
+    check("scenario ran to completion", false, e?.stack ?? String(e));
+  }
 } finally {
   for (const p of Object.values(provers)) await p.destroy();
 }

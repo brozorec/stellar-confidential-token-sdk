@@ -114,14 +114,23 @@ export const deriveTransferBlind = (s: bigint, sigma: bigint): bigint =>
  * scalar for any past outgoing transfer from `vk` plus the event's public
  * `sigma`, which is what makes D-sender disclosures work without retaining
  * per-transfer state. Uniqueness comes from `sigma` (fresh per attempt);
- * secrecy from `vk`. Throws on the ~2⁻²⁵⁴-probability zero
- * output (T8/W8 require `r_e ≠ 0`) — resample `sigma` if that ever happens.
+ * secrecy from `vk`. Throws {@link ZeroEphemeralScalarError} on the
+ * ~2⁻²⁵⁴-probability zero output (T8/W8 require `r_e ≠ 0`) — resample `sigma`
+ * if that ever happens.
  */
 export const deriveEphemeralRE = (vk: bigint, sigma: bigint): bigint => {
   const rE = poseidonWithDomain(DOMAIN.EPHEMERAL_KEY, [vk, sigma]);
-  if (rE === 0n) throw new Error("derived r_e is zero — resample sigma");
+  if (rE === 0n) throw new ZeroEphemeralScalarError();
   return rE;
 };
+
+/** {@link deriveEphemeralRE} produced the forbidden `r_e = 0`. */
+export class ZeroEphemeralScalarError extends Error {
+  constructor() {
+    super("derived r_e is zero — resample sigma");
+    this.name = "ZeroEphemeralScalarError";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Encrypted scalars: ciphertext = plaintext + Poseidon2(tag, ...)
@@ -142,6 +151,28 @@ export const encryptAllowance = (vA: bigint, dvk: bigint, sigmaA: bigint): bigin
 /** `escrowed_dvk = dvk + Poseidon2(ESCROWED_DELEGATION_VIEWING_KEY, s, op_i)`. */
 export const encryptEscDvk = (dvk: bigint, s: bigint, opI: bigint): bigint =>
   frAdd(dvk, poseidonWithDomain(DOMAIN.ESCROWED_DELEGATION_VIEWING_KEY, [s, opI]));
+
+/**
+ * Sender-auditor channel ({@link DOMAIN.AUDITOR_SENDER}, read three-wide):
+ * with `m = sponge_squeeze_3(AUDITOR_SENDER, s, sigma)`,
+ * `v_tilde_aud_s = amount + m[0]`, the balance checkpoint
+ * `b_tilde_aud_s = v_new + m[1]`, and the escrow of the new spendable blinding
+ * `r_tilde_aud_s = r_new + m[2]`. Transfer emits all three (T_a6–T_a9);
+ * withdraw only the checkpoint lanes (W_a3–W_a5) — its amount is public. Every
+ * lane adds in-circuit, so mod r (`frAdd`), the blinding escrow included.
+ */
+export function encryptAuditorSender(
+  sAs: bigint,
+  sigma: bigint,
+  plain: { amount: bigint; vNew: bigint; rNew: bigint },
+): { vAudS: bigint; bAudS: bigint; rAudS: bigint } {
+  const [m0, m1, m2] = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAs, sigma);
+  return {
+    vAudS: frAdd(plain.amount, m0),
+    bAudS: frAdd(plain.vNew, m1),
+    rAudS: frAdd(plain.rNew, m2),
+  };
+}
 
 /**
  * `r_a_tilde_aud_s = r_a + Poseidon2(ESCROWED_ALLOWANCE_BLINDING_AUDITOR, s_a_s, op_i)`

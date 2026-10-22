@@ -7,7 +7,8 @@
  * domain-separator scheme.
  *
  * `test/artifacts.mjs` pins these against `circuits/manifest.json` and
- * `package.json`, so a re-vendor or a version bump cannot leave them stale.
+ * `package.json`, so a re-vendor or a version bump cannot leave them stale;
+ * `scripts/build-disclosure.mjs` rewrites the two disclosure VK hashes itself.
  */
 
 import { addressToField } from "./crypto/address.js";

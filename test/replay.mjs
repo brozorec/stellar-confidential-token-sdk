@@ -23,7 +23,7 @@ import {
   encryptBalance,
 } from "../src/crypto/poseidon2.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
-import { StateEngine, StateDivergedError } from "../src/state/engine.ts";
+import { StateEngine, StateDivergedError, StateUnverifiedError } from "../src/state/engine.ts";
 import { MemoryStore } from "../src/state/store.ts";
 
 let pass = 0, fail = 0;
@@ -152,20 +152,25 @@ const finalSpend = cSpend, finalRecv = cRecv;
 
 // --- Stub chain: serves `evs` once, then an empty tail from the cursor -------
 const HEAD = 10 + seq + 1;
-function engineFor(evs, onchain) {
+// `onchain` is the account the balance read returns, or a function standing in
+// for confidentialBalance; `noCursor` serves events with no resume cursor.
+function engineFor(evs, onchain, { store = new MemoryStore(), noCursor = false } = {}) {
   const client = {
     cfg: { contracts: { token: TOKEN } },
     server: {
       getHealth: async () => ({ oldestLedger: 1 }),
       getEvents: async (req) => ({
         events: req.cursor ? [] : evs,
-        cursor: `${(BigInt(HEAD) << 32n).toString()}-0`,
+        cursor: noCursor ? undefined : `${(BigInt(HEAD) << 32n).toString()}-0`,
         latestLedger: HEAD,
       }),
     },
-    confidentialBalance: async () => onchain,
+    confidentialBalanceAt: async () => ({
+      account: typeof onchain === "function" ? await onchain() : onchain,
+      latestLedger: HEAD,
+    }),
   };
-  return new StateEngine({ client, store: new MemoryStore(), keys: me, address: A, fromLedger: 1 });
+  return new StateEngine({ client, store, keys: me, address: A, fromLedger: 1 });
 }
 const onchainOf = (spend, recv) => ({
   spendingKey: me.Y, viewingPublicKey: me.PVK, spendableBalance: spend, receivingBalance: recv, auditorId: 0,
@@ -216,6 +221,13 @@ console.log("divergence is loud and names the accumulator:");
   check("… on the spendable side only", err?.report?.spendableOk === false && err?.report?.receivingOk === true);
   const gate = await engine.spendableForProof().catch((e) => e);
   check("spendableForProof refuses a diverged spendable opening", gate instanceof StateDivergedError);
+  // The error carries the secret openings: reachable from code, but never
+  // picked up by serializers or error trackers.
+  check("… state still readable from code", gate?.state?.spendable?.v !== undefined);
+  check("… state is not enumerable", !Object.keys(gate).includes("state"));
+  const json = (() => { try { return JSON.stringify(gate); } catch (e) { return e; } })();
+  check("… JSON-serializes without the state", typeof json === "string" && !json.includes('"state"'), String(json));
+  check("… message carries no blinding", !gate.message.includes(String(gate.state.spendable.r)), gate.message);
 }
 {
   // Stop before the final clawback, so the late deposit sits in receiving
@@ -232,6 +244,124 @@ console.log("divergence is loud and names the accumulator:");
   const engine = engineFor([], null);
   const err = await engine.sync().catch((e) => e);
   check("unregistered account with no on-chain record syncs clean", !(err instanceof Error), String(err));
+}
+
+console.log("a failed balance read is not a divergence:");
+{
+  const outage = new Error("simulate confidential_balance failed: 503 Service Unavailable");
+  const engine = engineFor(events, async () => { throw outage; });
+  const err = await engine.sync().catch((e) => e);
+  check("sync surfaces the RPC error as-is", err === outage, String(err));
+  const gate = await engine.spendableForProof().catch((e) => e);
+  check("spendableForProof surfaces it too", gate === outage, String(gate));
+}
+
+console.log("no resume cursor → nothing applied or saved:");
+{
+  const store = new MemoryStore();
+  const engine = engineFor(events, onchainOf(finalSpend, finalRecv), { store, noCursor: true });
+  const err = await engine.sync().catch((e) => e);
+  check(
+    "sync refuses events it could not resume past",
+    err instanceof Error && !(err instanceof StateDivergedError) && /no resume cursor/.test(err.message),
+    String(err),
+  );
+  check("… and saves no state", (await store.load(A)) === null);
+}
+{
+  const engine = engineFor([], null, { noCursor: true });
+  const err = await engine.sync().catch((e) => e);
+  check("an empty fetch without a cursor is harmless", !(err instanceof Error), String(err));
+}
+
+console.log("a mismatch only counts at the fetched ledger:");
+// The i-th getEvents call serves `fetches[i]` (afterwards: nothing new at the
+// last ledger), each with a cursor at its own latestLedger; the i-th balance
+// read serves `reads[i]` (the last one repeats). `calls` counts both.
+function scriptedEngine(fetches, reads) {
+  const calls = { fetches: 0, reads: 0 };
+  const client = {
+    cfg: { contracts: { token: TOKEN } },
+    server: {
+      getHealth: async () => ({ oldestLedger: 1 }),
+      getEvents: async () => {
+        const f = fetches[calls.fetches++] ?? { events: [], ledger: fetches.at(-1).ledger };
+        return { events: f.events, cursor: `${(BigInt(f.ledger) << 32n).toString()}-0`, latestLedger: f.ledger };
+      },
+    },
+    confidentialBalanceAt: async () => {
+      const r = reads[Math.min(calls.reads++, reads.length - 1)];
+      return { account: r.account, latestLedger: r.ledger };
+    },
+  };
+  const engine = new StateEngine({ client, store: new MemoryStore(), keys: me, address: A, fromLedger: 1 });
+  return { engine, calls };
+}
+const final = onchainOf(finalSpend, finalRecv);
+const lastEv = events.at(-1);
+{
+  const { engine, calls } = scriptedEngine(
+    [{ events: events.filter((e) => e !== revokeEv), ledger: HEAD }],
+    [{ account: final, ledger: HEAD }],
+  );
+  const err = await engine.sync().catch((e) => e);
+  check("same ledger + mismatch → StateDivergedError", err instanceof StateDivergedError, String(err));
+  check("… with no re-fetch", calls.fetches === 1 && calls.reads === 1, JSON.stringify(calls));
+}
+{
+  // The final clawback lands after the first fetch; the read already sees it.
+  const { engine, calls } = scriptedEngine(
+    [
+      { events: events.slice(0, -1), ledger: HEAD },
+      { events: [lastEv], ledger: HEAD + 1 },
+    ],
+    [{ account: final, ledger: HEAD + 1 }],
+  );
+  const res = await engine.sync().catch((e) => e);
+  check("read ahead of the fetch → incremental sync, then clean", !(res instanceof Error), String(res));
+  check("… after exactly one more fetch", calls.fetches === 2 && calls.reads === 2, JSON.stringify(calls));
+  check("… and the late event applied once", res?.spendable?.v === 146n && res?.syncedLedger === HEAD + 1);
+}
+{
+  // A lagging node serves the balance from before the final clawback.
+  const { engine, calls } = scriptedEngine(
+    [{ events, ledger: HEAD }],
+    [
+      { account: onchainOf(spendBeforeLastClawback, finalRecv.add(scalarMul(7n, G))), ledger: HEAD - 1 },
+      { account: final, ledger: HEAD },
+    ],
+  );
+  const res = await engine.sync().catch((e) => e);
+  check("stale read → re-read only, then clean", !(res instanceof Error), String(res));
+  check("… without re-fetching", calls.fetches === 1 && calls.reads === 2, JSON.stringify(calls));
+}
+{
+  const { engine, calls } = scriptedEngine([{ events, ledger: HEAD }], [{ account: final, ledger: HEAD + 3 }]);
+  const res = await engine.sync().catch((e) => e);
+  check("a match at a later ledger verifies without re-fetching", !(res instanceof Error) && calls.fetches === 1, String(res));
+}
+{
+  // Every read stays one ledger ahead of every fetch and never matches.
+  const { engine, calls } = scriptedEngine(
+    [{ events: events.slice(0, -1), ledger: HEAD }],
+    [{ account: final, ledger: HEAD + 1 }],
+  );
+  const err = await engine.sync().catch((e) => e);
+  check(
+    "never lining up → StateUnverifiedError, not a divergence",
+    err instanceof StateUnverifiedError && !(err instanceof StateDivergedError),
+    String(err),
+  );
+  check("… after a capped number of reads", calls.reads === 5 && calls.fetches === 5, JSON.stringify(calls));
+  check("… reporting both ledgers", err?.syncedLedger === HEAD && err?.balanceLedger === HEAD + 1);
+  check("… without claiming a missed event", !/missed/.test(err?.message ?? ""), err?.message);
+
+  const gate = await engine.spendableForProof().catch((e) => e);
+  check(
+    "spendableForProof: mismatch at a newer ledger → sync first, not diverged",
+    gate instanceof StateUnverifiedError && /sync\(\) before proving/.test(gate.message),
+    String(gate),
+  );
 }
 
 console.log(`\nreplay: ${pass} passed, ${fail} failed`);

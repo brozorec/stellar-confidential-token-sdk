@@ -14,6 +14,7 @@ import { buildRegisterWitness } from "../src/witness/register.ts";
 import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
 import { encodeRegisterData, encodeWithdrawData, encodeTransferData } from "../src/chain/payload.ts";
+import { optionAddr } from "../src/chain/factory.ts";
 
 let pass = 0,
   fail = 0;
@@ -119,6 +120,18 @@ ok(
   wPayload.map().every((e) => e.key().switch().name === "scvSymbol"),
   "withdraw payload map keys are Symbols",
 );
+
+console.log("Option<Address> encoding:");
+ok(optionAddr(undefined).switch().name === "scvVoid", "optionAddr(undefined) → Void");
+ok(optionAddr(null).switch().name === "scvVoid", "optionAddr(null) → Void");
+ok(optionAddr(ACCOUNT).switch().name === "scvAddress", "optionAddr(G…) → Address");
+let emptyAddrErr;
+try {
+  optionAddr("");
+} catch (e) {
+  emptyAddrErr = e;
+}
+ok(emptyAddrErr !== undefined, "optionAddr(\"\") throws instead of encoding None");
 
 console.log(`\npayload: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

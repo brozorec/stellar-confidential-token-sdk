@@ -10,20 +10,23 @@
 
 import type { KeyPair } from "../crypto/keys.js";
 import { H, commit, scalarMul, ecdh, type Point } from "../crypto/grumpkin.js";
-import { randomScalar, frAdd } from "../crypto/field.js";
-import { DOMAIN } from "../crypto/constants.js";
+import { randomScalar } from "../crypto/field.js";
 import {
   deriveEphemeralRE,
   deriveSpendR,
+  encryptAuditorSender,
   encryptBalance,
-  spongeSqueeze3,
 } from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 export interface WithdrawParams {
   /** Spender's contract-bound key set. */
   keys: KeyPair;
-  /** Current spendable-balance plaintext value `v`. */
+  /**
+   * Current spendable-balance plaintext value `v`. Take `v`/`r` from
+   * `StateEngine.spendableForProof()`, which checks them against on-chain
+   * C_spend; this builder does not.
+   */
   v: bigint;
   /** Current spendable-balance blinding factor `r` (opening of C_spend). */
   r: bigint;
@@ -74,14 +77,11 @@ export function buildWithdrawWitness(p: WithdrawParams): WithdrawWitness {
   const bTilde = encryptBalance(vNew, keys.vk, sigma);
   const rePoint = scalarMul(rE, H);
 
-  // Sender-auditor channel, three-wide (W_a3): lane 0 (amount) unused — the
-  // withdrawn amount is public — lane 1 the balance checkpoint (W_a4), lane 2
-  // the escrow of the new blinding r' (W_a5). Both pads add in-circuit, so
-  // mod r (frAdd), not as a blinding accumulation.
+  // Sender-auditor channel (W_a3): only the balance checkpoint (W_a4) and the
+  // escrow of the new blinding r' (W_a5) — the withdrawn amount is public, so
+  // the amount lane is not emitted.
   const sAsX = ecdh(rE, kAudS);
-  const mS = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sAsX, sigma);
-  const bAudS = frAdd(vNew, mS[1]);
-  const rAudS = frAdd(rNew, mS[2]);
+  const { bAudS, rAudS } = encryptAuditorSender(sAsX, sigma, { amount, vNew, rNew });
 
   const inputs: NoirInputs = {
     sk: fieldIn(keys.sk),
