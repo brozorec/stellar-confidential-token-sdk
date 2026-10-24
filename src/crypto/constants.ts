@@ -152,7 +152,7 @@ export const DOMAIN = {
    * Allowance-blinding escrow to the owner's auditor (S14):
    * `r_a_tilde_aud_s = r_a + Poseidon2(ESCROWED_ALLOWANCE_BLINDING_AUDITOR,
    * s_a_s, op_i)`. Absorbed inside the set_spender circuit, so it is on-chain
-   * wire format even though this SDK does not prove set_spender.
+   * wire format.
    */
   ESCROWED_ALLOWANCE_BLINDING_AUDITOR: 17n,
 } as const;

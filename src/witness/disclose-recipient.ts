@@ -21,7 +21,11 @@ import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 export interface DiscloseRecipientParams {
   /** Holder's contract-bound key set (the event's `to` account). */
   keys: KeyPair;
-  /** Per-event fields from the on-chain `Transfer` being disclosed. */
+  /**
+   * Per-event fields from the on-chain `Transfer` or `SpenderTransfer` being
+   * disclosed; `sigma` is the event nonce `σ_E` (`sigma_a_new` on a
+   * SpenderTransfer).
+   */
   event: { rE: Point; sigma: bigint; vTilde: bigint };
   /** Disclosure recipient's Grumpkin pubkey `P_R`. */
   pR: Point;

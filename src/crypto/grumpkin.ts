@@ -103,6 +103,26 @@ export function ecdh(scalar: bigint, p: Point): bigint {
   return poseidonWithDomain(DOMAIN.ECDH_SHARED_SECRET, [x, y]);
 }
 
+/**
+ * The two curve points with x-coordinate `x`, as `[P, -P]`, or `null` if `x`
+ * is not canonical or `x³ − 17` is not a square in `F_r`. For on-chain
+ * encodings that keep only an x-coordinate (`escrowed_dvk`'s `R_x`): which of
+ * the two was meant is not recoverable from `x`, so callers resolve it by
+ * trial. The order of the pair is arbitrary.
+ */
+export function pointsWithX(x: bigint): [Point, Point] | null {
+  if (x < 0n || x >= FR_MODULUS) return null;
+  const rhs = Fr.sub(Fr.pow(x, 3n), 17n);
+  let y: bigint;
+  try {
+    y = Fr.sqrt(rhs);
+  } catch {
+    return null;
+  }
+  const p = Grumpkin.fromAffine({ x, y });
+  return [p, p.negate()];
+}
+
 /** Affine coordinates, returning `(0, 0)` for the identity. */
 export function pointCoords(p: Point): { x: bigint; y: bigint } {
   if (p.is0()) return { x: 0n, y: 0n };

@@ -24,15 +24,19 @@ import {
 } from "../crypto/poseidon2.js";
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
-/** The per-event fields of the on-chain `Transfer` being disclosed. */
+/** The per-event fields of the on-chain `Transfer` or `SpenderTransfer` being disclosed. */
 export interface DisclosedTransferFields {
   rE: Point;
+  /** The event nonce `σ_E`: `sigma` on a Transfer, `sigma_a_new` on a SpenderTransfer. */
   sigma: bigint;
   vTilde: bigint;
 }
 
 export interface DiscloseSenderParams {
-  /** Originator's contract-bound key set (the event's `from` account). */
+  /**
+   * Originator's contract-bound key set: the event's `from` account for a
+   * Transfer, its `spender` for a SpenderTransfer.
+   */
   keys: KeyPair;
   event: DisclosedTransferFields;
   /** Transfer recipient's stored viewing key (from the account at `E.to`). */

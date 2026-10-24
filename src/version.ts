@@ -16,7 +16,7 @@ import { toHex32 } from "./crypto/field.js";
 
 export const VERSIONS = {
   /** This package. */
-  sdk: "0.2.0",
+  sdk: "0.3.0",
   /** The protocol release (and its documentation set) the SDK implements. */
   protocol: {
     crate: "stellar-confidential",

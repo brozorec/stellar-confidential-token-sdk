@@ -13,7 +13,15 @@ import { pointToBytes } from "../src/crypto/grumpkin.ts";
 import { buildRegisterWitness } from "../src/witness/register.ts";
 import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
-import { encodeRegisterData, encodeWithdrawData, encodeTransferData } from "../src/chain/payload.ts";
+import { buildSetSpenderWitness } from "../src/witness/set-spender.ts";
+import { buildSpenderTransferWitness } from "../src/witness/spender-transfer.ts";
+import {
+  encodeRegisterData,
+  encodeWithdrawData,
+  encodeTransferData,
+  encodeSetSpenderData,
+  encodeSpenderTransferData,
+} from "../src/chain/payload.ts";
 import { optionAddr } from "../src/chain/factory.ts";
 
 let pass = 0,
@@ -119,6 +127,84 @@ ok(
 ok(
   wPayload.map().every((e) => e.key().switch().name === "scvSymbol"),
   "withdraw payload map keys are Symbols",
+);
+
+const payloadOf = (data) =>
+  xdr.ScVal.fromXDR(data.bytes()).map().find((e) => e.key().sym().toString() === "payload").val();
+const fieldOf = (payload, k) => payload.map().find((e) => e.key().sym().toString() === k).val();
+
+console.log("set_spender envelope:");
+const sw = buildSetSpenderWitness({
+  keys, v: 1000n, r: 5n, amount: 300n, spender: ACCOUNT, yOp: recipient.Y, kAudS: recipient.PVK,
+});
+const sPayload = payloadOf(encodeSetSpenderData(sw, proof));
+ok(
+  JSON.stringify(sPayload.map().map((e) => e.key().sym().toString())) ===
+    JSON.stringify([
+      "a_tilde",
+      "b_tilde",
+      "b_tilde_aud_s",
+      "c_a",
+      "c_spend_new",
+      "escrowed_dvk",
+      "r_a_tilde_aud_s",
+      "r_e_point",
+      "r_tilde_aud_s",
+      "sigma",
+      "sigma_a",
+      "v_tilde_aud_s",
+    ]),
+  "set_spender payload keys sorted (12 fields)",
+);
+ok(sPayload.map().every((e) => e.key().switch().name === "scvSymbol"), "set_spender payload map keys are Symbols");
+// escrowed_dvk is (R_x, dvk_cipher), and R_x is R_e.x — the first half of r_e_point.
+const esc = fieldOf(sPayload, "escrowed_dvk").bytes();
+ok(esc.length === 64, "escrowed_dvk is 64 bytes");
+ok(
+  Buffer.from(esc.subarray(0, 32)).equals(Buffer.from(pointToBytes(sw.payload.rE).subarray(0, 32))),
+  "escrowed_dvk[0..32] == R_e.x",
+);
+ok(
+  Buffer.from(esc.subarray(32)).equals(Buffer.from(toBytes32BE(sw.payload.escrowedDvk.cipher))),
+  "escrowed_dvk[32..64] == dvk_cipher",
+);
+ok(fieldOf(sPayload, "c_a").bytes().length === 64, "c_a is 64 bytes");
+ok(
+  Buffer.from(toBytes32BE(sw.payload.raAudS)).equals(fieldOf(sPayload, "r_a_tilde_aud_s").bytes()),
+  "r_a_tilde_aud_s bytes == witness value",
+);
+
+console.log("spender_transfer envelope:");
+const stw = buildSpenderTransferWitness({
+  keys: recipient,
+  allowance: { dvk: sw.allowance.dvk, sigmaA: sw.allowance.sigmaA, v: sw.allowance.v },
+  amount: 100n,
+  pvkRecipient: keys.PVK,
+  kAudR: keys.PVK,
+  kAudS: recipient.PVK,
+});
+const stPayload = payloadOf(encodeSpenderTransferData(stw, proof));
+ok(
+  JSON.stringify(stPayload.map().map((e) => e.key().sym().toString())) ===
+    JSON.stringify([
+      "a_tilde_aud_s",
+      "a_tilde_new",
+      "c_a_new",
+      "c_transfer",
+      "r_e_point",
+      "r_tilde_aud_r",
+      "r_tilde_aud_s",
+      "sigma_a_new",
+      "v_tilde",
+      "v_tilde_aud_r",
+      "v_tilde_aud_s",
+    ]),
+  "spender_transfer payload keys sorted (11 fields)",
+);
+ok(stPayload.map().every((e) => e.key().switch().name === "scvSymbol"), "spender_transfer payload map keys are Symbols");
+ok(
+  Buffer.from(toBytes32BE(stw.payload.sigmaANew)).equals(fieldOf(stPayload, "sigma_a_new").bytes()),
+  "sigma_a_new bytes == witness value",
 );
 
 console.log("Option<Address> encoding:");

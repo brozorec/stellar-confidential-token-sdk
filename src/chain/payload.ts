@@ -23,12 +23,26 @@ import { toBytes32BE } from "../crypto/field.js";
 import type { RegisterWitness } from "../witness/register.js";
 import type { WithdrawWitness } from "../witness/withdraw.js";
 import type { TransferWitness } from "../witness/transfer.js";
+import type { SetSpenderWitness } from "../witness/set-spender.js";
+import type { SpenderTransferWitness } from "../witness/spender-transfer.js";
+import type { EscrowedDvk } from "../crypto/delegation.js";
 
 // `scvBytes` is typed for Buffer but accepts any byte view at runtime; normalize
 // to Buffer so this is correct under both Node and bundlers.
 const scvBytes = (b: Uint8Array): xdr.ScVal => xdr.ScVal.scvBytes(Buffer.from(b));
 const pointVal = (p: Point): xdr.ScVal => scvBytes(pointToBytes(p));
 const fieldVal = (v: bigint): xdr.ScVal => scvBytes(toBytes32BE(v));
+
+/**
+ * `escrowed_dvk: BytesN<64>` = `be(R_x) || be(dvk_cipher)`. Two field limbs,
+ * not a point: `R.y` is not stored, so this must not go through `pointVal`.
+ */
+export function escrowedDvkToBytes(e: EscrowedDvk): Uint8Array {
+  const out = new Uint8Array(64);
+  out.set(toBytes32BE(e.rX), 0);
+  out.set(toBytes32BE(e.cipher), 32);
+  return out;
+}
 
 /** A contracttype struct: ScMap with symbol keys sorted ascending (byte order). */
 export function scvStruct(fields: Record<string, xdr.ScVal>): xdr.ScVal {
@@ -90,6 +104,43 @@ export function encodeTransferData(w: TransferWitness, proof: Uint8Array): xdr.S
     r_tilde_aud_r: fieldVal(p.rAudR),
     v_tilde_aud_s: fieldVal(p.vAudS),
     b_tilde_aud_s: fieldVal(p.bAudS),
+    r_tilde_aud_s: fieldVal(p.rAudS),
+  });
+  return envelope(payload, proof);
+}
+
+export function encodeSetSpenderData(w: SetSpenderWitness, proof: Uint8Array): xdr.ScVal {
+  const p = w.payload;
+  const payload = scvStruct({
+    c_spend_new: pointVal(p.cSpendNew),
+    c_a: pointVal(p.cA),
+    escrowed_dvk: scvBytes(escrowedDvkToBytes(p.escrowedDvk)),
+    b_tilde: fieldVal(p.bTilde),
+    a_tilde: fieldVal(p.aTilde),
+    r_e_point: pointVal(p.rE),
+    sigma: fieldVal(p.sigma),
+    sigma_a: fieldVal(p.sigmaA),
+    v_tilde_aud_s: fieldVal(p.vAudS),
+    b_tilde_aud_s: fieldVal(p.bAudS),
+    r_tilde_aud_s: fieldVal(p.rAudS),
+    r_a_tilde_aud_s: fieldVal(p.raAudS),
+  });
+  return envelope(payload, proof);
+}
+
+export function encodeSpenderTransferData(w: SpenderTransferWitness, proof: Uint8Array): xdr.ScVal {
+  const p = w.payload;
+  const payload = scvStruct({
+    c_a_new: pointVal(p.cANew),
+    c_transfer: pointVal(p.cTransfer),
+    r_e_point: pointVal(p.rE),
+    v_tilde: fieldVal(p.vTilde),
+    a_tilde_new: fieldVal(p.aTildeNew),
+    sigma_a_new: fieldVal(p.sigmaANew),
+    v_tilde_aud_r: fieldVal(p.vAudR),
+    r_tilde_aud_r: fieldVal(p.rAudR),
+    v_tilde_aud_s: fieldVal(p.vAudS),
+    a_tilde_aud_s: fieldVal(p.aAudS),
     r_tilde_aud_s: fieldVal(p.rAudS),
   });
   return envelope(payload, proof);

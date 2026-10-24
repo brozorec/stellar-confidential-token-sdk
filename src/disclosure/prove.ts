@@ -1,13 +1,17 @@
 /**
  * Holder-side disclosure proving:
- * take a recipient's request `(P_R, nu)` and a `Transfer` event, produce the
- * proof bundle to hand back. One entry point per role:
+ * take a recipient's request `(P_R, nu)` and a `Transfer` or `SpenderTransfer`
+ * event, produce the proof bundle to hand back. One entry point per role:
  *
  *   - proveRecipientDisclosure — the event paid me (D-recipient)
  *   - proveSenderDisclosure    — I sent the event (D-sender; r_e is
- *                                re-derived from vk + the event's sigma, and
+ *                                re-derived from vk + the event's σ_E, and
  *                                an event it does not reproduce is reported
  *                                as not disclosable)
+ *
+ * The event nonce `σ_E` is `σ` for a Transfer and `σ_a'` for a
+ * SpenderTransfer. The D-sender originator of a SpenderTransfer is the
+ * spender; the owner cannot D-sender it.
  *
  * Pure orchestration over the witness builders + prover; the heavy lifting
  * (ECDH decrypt, U-block) is in witness/disclose-{recipient,sender}.ts.
@@ -16,8 +20,7 @@
 import type { KeyPair } from "../crypto/keys.js";
 import type { Point } from "../crypto/grumpkin.js";
 import { fromHex, toHex32, bytesToHex } from "../crypto/field.js";
-import type { TransferEvent } from "../chain/events.js";
-import { eventRef } from "../chain/events.js";
+import { eventRef, type ConfidentialEvent } from "../chain/events.js";
 import type { CircuitProver } from "../proving/prover.js";
 import { buildDiscloseRecipientWitness } from "../witness/disclose-recipient.js";
 import {
@@ -28,6 +31,9 @@ import {
 import {
   DISCLOSE_RECIPIENT_CIRCUIT_ID,
   DISCLOSE_SENDER_CIRCUIT_ID,
+  disclosureNonce,
+  isDisclosableEvent,
+  type DisclosableEvent,
   type DisclosureBundle,
   type DisclosureCircuitId,
   type DisclosureRequest,
@@ -48,8 +54,8 @@ export type SenderDisclosureOutcome =
 export async function proveRecipientDisclosure(params: {
   /** Holder's key set — must be the event's `to` account. */
   keys: KeyPair;
-  /** The inbound transfer event being disclosed. */
-  event: TransferEvent;
+  /** The inbound transfer or spender-transfer event being disclosed. */
+  event: DisclosableEvent;
   /** The recipient's request, received out-of-band. */
   request: DisclosureRequest;
   /** ZK prover over the shared disclose_recipient artifact (`circuits/disclosure/`). */
@@ -57,9 +63,10 @@ export async function proveRecipientDisclosure(params: {
 }): Promise<DisclosureBundle> {
   const { keys, event, request, prover } = params;
   requireZk(prover, DISCLOSE_RECIPIENT_CIRCUIT_ID);
+  requireDisclosable(event, DISCLOSE_RECIPIENT_CIRCUIT_ID);
   const w = buildDiscloseRecipientWitness({
     keys,
-    event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
+    event: { rE: event.rE, sigma: disclosureNonce(event), vTilde: event.vTilde },
     pR: pointFromJson(request.pR),
     nu: fromHex(request.nu),
   });
@@ -68,10 +75,13 @@ export async function proveRecipientDisclosure(params: {
 }
 
 export async function proveSenderDisclosure(params: {
-  /** Originator's key set — must be the event's `from` account. */
+  /**
+   * Originator's key set: the event's `from` account for a Transfer, its
+   * `spender` for a SpenderTransfer.
+   */
   keys: KeyPair;
-  /** The outbound transfer event being disclosed. */
-  event: TransferEvent;
+  /** The outbound transfer or spender-transfer event being disclosed. */
+  event: DisclosableEvent;
   /** Transfer recipient's stored viewing key (read from the account at `E.to`). */
   pvkB: Point;
   /** The recipient's request, received out-of-band. */
@@ -81,13 +91,14 @@ export async function proveSenderDisclosure(params: {
 }): Promise<SenderDisclosureOutcome> {
   const { keys, event, pvkB, request, prover } = params;
   requireZk(prover, DISCLOSE_SENDER_CIRCUIT_ID);
+  requireDisclosable(event, DISCLOSE_SENDER_CIRCUIT_ID);
   // The builder establishes disclosability first, so a non-disclosable event
   // never reaches the prover.
   let w: DiscloseSenderWitness;
   try {
     w = buildDiscloseSenderWitness({
       keys,
-      event: { rE: event.rE, sigma: event.sigma, vTilde: event.vTilde },
+      event: { rE: event.rE, sigma: disclosureNonce(event), vTilde: event.vTilde },
       pvkB,
       pR: pointFromJson(request.pR),
       nu: fromHex(request.nu),
@@ -109,9 +120,19 @@ function requireZk(prover: CircuitProver, circuitId: DisclosureCircuitId): void 
   }
 }
 
+/**
+ * The type already says so; this catches an untyped caller passing another
+ * event, which would otherwise fail deep in the witness builder.
+ */
+function requireDisclosable(event: ConfidentialEvent, circuitId: DisclosureCircuitId): void {
+  if (!isDisclosableEvent(event)) {
+    throw new Error(`${circuitId}: disclosures cover Transfer and SpenderTransfer events, not "${event.type}"`);
+  }
+}
+
 function bundle(
   circuitId: DisclosureCircuitId,
-  event: TransferEvent,
+  event: DisclosableEvent,
   proof: Uint8Array,
   w: { rDisc: Point; vTildeDisc: bigint },
 ): DisclosureBundle {

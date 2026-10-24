@@ -3,11 +3,14 @@
 // judges the SDK's proofs. It deploys fresh verifier + auditor registries and
 // the factory, has the factory deploy an allowlist + compliant token, registers
 // the committed VKs, and runs register → deposit → merge → transfer → withdraw
-// → transfer back → freeze → clawback ×2 with real proofs, checking after
-// every step that the SDK's openings re-commit to the on-chain points (via
-// StateEngine.sync's consistency check) and that the emitted events decode to
-// exactly what was submitted. Along the way it exercises the factory and admin
-// helpers (roles, freeze, allowlist, compliance config).
+// → transfer back → freeze → clawback ×2, then the delegation lifecycle
+// (set_spender → spender_transfer ×2 → revoke_spender, and an expired
+// delegation force-revoked by compliance) with real proofs, checking after
+// every step that the SDK's openings — the owner's via StateEngine.sync, the
+// spender's via SpenderWallet — re-commit to the on-chain points and that the
+// emitted events decode to exactly what was submitted. Along the way it
+// exercises the factory and admin helpers (roles, freeze, allowlist,
+// compliance config).
 //
 // Env-gated (needs a network and the example wasms), SKIPS cleanly when unset:
 //
@@ -40,16 +43,22 @@ import {
   CIRCUIT_TYPE,
   ChainClient,
   CircuitProver,
+  DelegationExpiredError,
   H,
   MANAGER_ROLE,
   MemoryStore,
   StateEngine,
   TOKEN_ROLES,
   addressToField,
+  SpenderWallet,
   allowUser,
+  auditSetSpender,
+  auditSpenderTransfer,
   auditTransfer,
   auditWithdraw,
   buildRegisterWitness,
+  buildSetSpenderWitness,
+  buildSpenderTransferWitness,
   buildTransferWitness,
   buildWithdrawWitness,
   clawback,
@@ -60,6 +69,7 @@ import {
   disallowUser,
   fetchEvents,
   fieldIn,
+  forceRevokeSpender,
   freezeAccount,
   grantRole,
   hasRole,
@@ -79,6 +89,9 @@ import {
   submitDeposit,
   submitMerge,
   submitRegister,
+  submitRevokeSpender,
+  submitSetSpender,
+  submitSpenderTransfer,
   submitTransfer,
   submitWithdraw,
   unfreezeAccount,
@@ -264,6 +277,8 @@ const provers = {
   register: new CircuitProver(loadCircuit("register")),
   withdraw: new CircuitProver(loadCircuit("withdraw")),
   transfer: new CircuitProver(loadCircuit("transfer")),
+  set_spender: new CircuitProver(loadCircuit("set_spender")),
+  spender_transfer: new CircuitProver(loadCircuit("spender_transfer")),
   clawback: new CircuitProver(loadCircuit("clawback")),
 };
 
@@ -481,6 +496,177 @@ try {
   );
   await step("unfreeze alice", () => unfreezeAccount(client, adminSigner, token, A, ADMIN));
   check("alice no longer frozen", !(await isFrozen(client, token, A)));
+
+  // -------------------------------------------------------------------------
+  // Delegation: alice owns, bob spends
+  // -------------------------------------------------------------------------
+
+  console.log("\nset_spender alice→bob:");
+  const bWallet = new SpenderWallet({ client, keys: bKeys, address: B });
+  const aAcct = await client.confidentialBalance(A);
+  const bAcct = await client.confidentialBalance(B);
+  const ESCROW = 300_000n;
+  const aOpen = await aEngine.spendableForProof();
+  // Past the wallet's default 17 280-ledger warning horizon, so "live".
+  const liveUntil = (await client.latestLedger()) + 50_000;
+  const ssw = buildSetSpenderWitness({
+    keys: aKeys, v: aOpen.v, r: aOpen.r, amount: ESCROW, spender: B, yOp: bAcct.spendingKey, kAudS: kAud,
+  });
+  const ssProof = await provers.set_spender.prove(ssw.inputs);
+  await step("set_spender (26 public inputs)", () =>
+    submitSetSpender(client, aSigner, A, B, liveUntil, ssw, ssProof.proof),
+  );
+  const aAfterSet = await expectSync("alice", aEngine);
+  check(
+    "alice: set_spender is a checkpoint at v − v_a",
+    aAfterSet?.spendable.v === aOpen.v - ESCROW && aAfterSet?.spendable.r === ssw.next.r,
+  );
+  const bAllow = await bWallet.allowance(A);
+  check(
+    "bob: allowance read from the on-chain escrow alone",
+    bAllow?.v === ESCROW && bAllow?.status === "live" && bAllow?.liveUntilLedger === liveUntil,
+    `v=${bAllow?.v} status=${bAllow?.status} liveUntil=${bAllow?.liveUntilLedger}/${liveUntil}`,
+  );
+  check("bob: dvk recovered from the escrow == alice's", bAllow?.dvk === ssw.allowance.dvk);
+  check("is_spender(alice, bob)", await client.isSpender(A, B));
+  check("alice: her view of the delegation", (await aEngine.delegation(B))?.v === ESCROW);
+
+  // verify_proof runs before the existence check, so this needs a real proof.
+  const aOpen2 = await aEngine.spendableForProof();
+  const dup = buildSetSpenderWitness({
+    keys: aKeys, v: aOpen2.v, r: aOpen2.r, amount: 1n, spender: B, yOp: bAcct.spendingKey, kAudS: kAud,
+  });
+  const dupProof = await provers.set_spender.prove(dup.inputs);
+  await expectContractError("second set_spender for the pair rejected (3503)", 3503, () =>
+    submitSetSpender(client, aSigner, A, B, liveUntil, dup, dupProof.proof),
+  );
+
+  console.log("\nspender_transfer (bob spends alice's allowance):");
+  const spend = async (toAcct, amount) => {
+    const allowance = await bWallet.allowanceForProof(A);
+    const w = buildSpenderTransferWitness({
+      keys: bKeys,
+      allowance,
+      amount,
+      pvkRecipient: toAcct.viewingPublicKey,
+      kAudR: await client.auditorKey(toAcct.auditorId),
+      kAudS: await client.auditorKey(aAcct.auditorId),
+    });
+    return { w, proof: (await provers.spender_transfer.prove(w.inputs)).proof };
+  };
+  const SPEND1 = 120_000n;
+  const bBefore = await bEngine.current();
+  const st1 = await spend(bAcct, SPEND1);
+  await step("spender_transfer bob→bob (25 public inputs)", () =>
+    submitSpenderTransfer(client, bSigner, B, A, B, st1.w, st1.proof),
+  );
+  const bAfter1 = await expectSync("bob", bEngine);
+  check("bob: receiving credited by the spender transfer", bAfter1?.receiving.v === bBefore.receiving.v + SPEND1);
+  const aAfterSt1 = await expectSync("alice", aEngine);
+  check("alice: balances untouched by a spender transfer", aAfterSt1?.spendable.v === aAfterSet?.spendable.v);
+  const al1 = await bWallet.allowance(A);
+  check(
+    "bob: allowance re-read = witness.next (value, blinding, rotated salt)",
+    al1?.v === ESCROW - SPEND1 && al1?.r === st1.w.next.r && al1?.sigmaA === st1.w.payload.sigmaANew,
+  );
+
+  const SPEND2 = 50_000n;
+  const aRecvBefore = aAfterSt1?.receiving.v ?? 0n;
+  const st2 = await spend(aAcct, SPEND2);
+  await step("spender_transfer bob→alice (to the owner)", () =>
+    submitSpenderTransfer(client, bSigner, B, A, A, st2.w, st2.proof),
+  );
+  const aAfterSt2 = await expectSync("alice", aEngine);
+  check("alice: credited by her own spender's transfer", aAfterSt2?.receiving.v === aRecvBefore + SPEND2);
+  check("alice: her view follows bob's spends", (await aEngine.delegation(B))?.v === ESCROW - SPEND1 - SPEND2);
+
+  console.log("\ndelegation events + auditor:");
+  const dEvents = (await fetchEvents(client, { startLedger: fromLedger })).events;
+  const evSet = dEvents.find((e) => e.type === "set_spender");
+  check(
+    "set_spender event carries the submitted fields",
+    evSet?.account === A && evSet?.spender === B && evSet?.liveUntilLedger === liveUntil &&
+      evSet?.bTilde === ssw.payload.bTilde && evSet?.raAudS === ssw.payload.raAudS,
+  );
+  const evSts = dEvents.filter((e) => e.type === "spender_transfer");
+  check(
+    "spender_transfer events carry σ_a' and the owner channel",
+    evSts.length === 2 && evSts[0].sigmaANew === st1.w.payload.sigmaANew &&
+      evSts[0].aAudS === st1.w.payload.aAudS && evSts[1].from === A && evSts[1].to === A,
+  );
+  const as = auditSetSpender(kSecret, evSet);
+  check(
+    "auditor: set_spender opens alice's C_spend' and the new C_a",
+    commit(as.senderBalance, as.senderBlinding).equals(ssw.next.cSpend) &&
+      commit(as.amount, as.allowanceBlinding).equals(ssw.payload.cA),
+  );
+  const ast = auditSpenderTransfer(kSecret, evSts[1]);
+  const entryNow = await client.spenderDelegation(A, B);
+  check(
+    "auditor: the last spender_transfer opens the on-chain C_a'",
+    ast.channelsAgree && ast.amount === SPEND2 &&
+      commit(ast.allowance, ast.allowanceBlinding).equals(entryNow.allowanceCommitment),
+  );
+
+  console.log("\nrevoke_spender:");
+  const aBeforeRevoke = aAfterSt2;
+  await step("revoke_spender alice/bob", () => submitRevokeSpender(client, aSigner, A, B));
+  const aAfterRevoke = await expectSync("alice", aEngine);
+  check(
+    "alice: revoke folded the remaining allowance into spendable",
+    aAfterRevoke?.spendable.v === aBeforeRevoke.spendable.v + (ESCROW - SPEND1 - SPEND2),
+  );
+  check("bob: no delegation after revoke", (await bWallet.allowance(A)) === null);
+  check("is_spender false after revoke", !(await client.isSpender(A, B)));
+  await expectContractError("spending a revoked delegation rejected (3504)", 3504, () =>
+    submitSpenderTransfer(client, bSigner, B, A, B, st2.w, st2.proof),
+  );
+
+  console.log("\nexpired delegation, compliance force-revoke:");
+  const ESCROW2 = 40_000n;
+  const aOpen3 = await aEngine.spendableForProof();
+  const sw2 = buildSetSpenderWitness({
+    keys: aKeys, v: aOpen3.v, r: aOpen3.r, amount: ESCROW2, spender: B, yOp: bAcct.spendingKey, kAudS: kAud,
+  });
+  const sw2Proof = await provers.set_spender.prove(sw2.inputs);
+  // submitSetSpender needs liveUntil ≥ latest + 2; +3 leaves a ledger of slack
+  // for one to close between this read and its own.
+  const shortLive = (await client.latestLedger()) + 3;
+  await step("set_spender with a 3-ledger lifetime", () =>
+    submitSetSpender(client, aSigner, A, B, shortLive, sw2, sw2Proof.proof),
+  );
+  await expectSync("alice", aEngine);
+  while ((await client.latestLedger()) <= shortLive) await new Promise((r) => setTimeout(r, 1000));
+  const expired = await bWallet.allowance(A);
+  check(
+    "bob: an expired delegation is reported, still holding its value",
+    expired?.status === "expired" && expired?.v === ESCROW2 && expired?.ledgersRemaining < 0,
+  );
+  check("bob: allowanceForProof refuses it", (await bWallet.allowanceForProof(A).catch((e) => e)) instanceof DelegationExpiredError);
+  check("is_spender false once expired", !(await client.isSpender(A, B)));
+  // The contract agrees: a valid proof against the expired entry is refused.
+  const stExp = buildSpenderTransferWitness({
+    keys: bKeys, allowance: expired, amount: 1n, pvkRecipient: bAcct.viewingPublicKey, kAudR: kAud, kAudS: kAud,
+  });
+  const stExpProof = await provers.spender_transfer.prove(stExp.inputs);
+  await expectContractError("spending an expired delegation rejected (3505)", 3505, () =>
+    submitSpenderTransfer(client, bSigner, B, A, B, stExp, stExpProof.proof),
+  );
+  await expectContractError("force_revoke_spender of an unfrozen owner rejected (3604)", 3604, () =>
+    forceRevokeSpender(client, adminSigner, token, A, B, ADMIN),
+  );
+  await step("freeze alice", () => freezeAccount(client, adminSigner, token, A, ADMIN));
+  const aBeforeForce = await expectSync("alice", aEngine);
+  await step("force_revoke_spender (expired delegation)", () =>
+    forceRevokeSpender(client, adminSigner, token, A, B, ADMIN),
+  );
+  const aAfterForce = await expectSync("alice", aEngine);
+  check(
+    "alice: the force revoke folded the expired allowance back",
+    aAfterForce?.spendable.v === aBeforeForce?.spendable.v + ESCROW2,
+  );
+  check("bob: no delegation after the force revoke", (await bWallet.allowance(A)) === null);
+  await step("unfreeze alice", () => unfreezeAccount(client, adminSigner, token, A, ADMIN));
 } catch (e) {
   // A failed step already recorded its failure; the rest depends on it.
   // Anything else (witness build, prove, a sync or event read outside a step)

@@ -19,6 +19,8 @@ import {
 } from "@stellar/stellar-sdk";
 
 import { pointFromBytes, type Point } from "../crypto/grumpkin.js";
+import { fromBytesBE } from "../crypto/field.js";
+import type { EscrowedDvk } from "../crypto/delegation.js";
 import { parseContractErrorCode } from "./errors.js";
 
 /** Source used for read-only simulation; never signs, never pays. */
@@ -26,6 +28,9 @@ const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 /** `ConfidentialTokenError::AccountNotRegistered` — `confidential_balance` on an unknown account. */
 const ACCOUNT_NOT_REGISTERED = 3501;
+
+/** `ConfidentialTokenError::DelegationNotFound` — `get_spender_delegation` on an absent pair. */
+const DELEGATION_NOT_FOUND = 3504;
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 60;
@@ -67,6 +72,20 @@ export interface OnChainAccount {
   spendableBalance: Point;
   receivingBalance: Point;
   auditorId: number;
+}
+
+/** On-chain `(owner, spender)` delegation (`get_spender_delegation` return value). */
+export interface OnChainDelegation {
+  /** `C_a = Com(v_a, r_a)`. */
+  allowanceCommitment: Point;
+  /** `a_tilde = v_a + Poseidon2(ENCRYPTED_ALLOWANCE, dvk, σ_a)`. */
+  aTilde: bigint;
+  /** ECDH escrow of `dvk` under the spender's spending key. */
+  escrowedDvk: EscrowedDvk;
+  /** `σ_a`, the salt `C_a` and `a_tilde` are derived under. */
+  allowanceSalt: bigint;
+  /** Spendable while `ledger ≤ liveUntilLedger`; the value stays escrowed after. */
+  liveUntilLedger: number;
 }
 
 /**
@@ -185,6 +204,48 @@ export class ChainClient {
     return (await this.confidentialBalance(address)) !== null;
   }
 
+  /**
+   * Read the `(owner, spender)` delegation, or `null` if none exists — never
+   * delegated, or revoked. An expired entry is returned: its value is still
+   * escrowed until revoked. Only `DelegationNotFound` maps to `null`; every
+   * other failure propagates, as in {@link confidentialBalance}.
+   */
+  async spenderDelegation(owner: string, spender: string): Promise<OnChainDelegation | null> {
+    return (await this.spenderDelegationAt(owner, spender)).delegation;
+  }
+
+  /**
+   * {@link spenderDelegation}, plus the ledger the read ran against — what an
+   * expiry check compares `liveUntilLedger` with.
+   */
+  async spenderDelegationAt(
+    owner: string,
+    spender: string,
+  ): Promise<{ delegation: OnChainDelegation | null; latestLedger: number }> {
+    let read: { retval: xdr.ScVal; latestLedger: number };
+    try {
+      read = await this.simulateAt(this.cfg.contracts.token, "get_spender_delegation", [
+        new Address(owner).toScVal(),
+        new Address(spender).toScVal(),
+      ]);
+    } catch (e) {
+      if (e instanceof SimulationFailedError && parseContractErrorCode(e.message) === DELEGATION_NOT_FOUND) {
+        return { delegation: null, latestLedger: e.latestLedger };
+      }
+      throw e;
+    }
+    return { delegation: parseDelegation(read.retval), latestLedger: read.latestLedger };
+  }
+
+  /** `is_spender(account, spender)`: a delegation exists AND is not expired. */
+  async isSpender(owner: string, spender: string): Promise<boolean> {
+    const retval = await this.simulate(this.cfg.contracts.token, "is_spender", [
+      new Address(owner).toScVal(),
+      new Address(spender).toScVal(),
+    ]);
+    return retval.b();
+  }
+
   /** Fetch auditor key `K_aud` (BytesN<64>) for an `auditor_id`. */
   async auditorKey(auditorId: number): Promise<Point> {
     const retval = await this.simulate(this.cfg.contracts.auditor, "get_key", [
@@ -295,4 +356,48 @@ function parseAccount(val: xdr.ScVal): OnChainAccount {
     );
   }
   return out as OnChainAccount;
+}
+
+/**
+ * Decode the `SpenderDelegation` struct returned by `get_spender_delegation`.
+ * Field names are the contract's verbatim (`storage.rs`); a missing one throws
+ * for the same reason as in {@link parseAccount}.
+ */
+export function parseDelegation(val: xdr.ScVal): OnChainDelegation {
+  const entries = val.map();
+  if (!entries) throw new Error("expected ScMap for SpenderDelegation");
+  const out: Partial<OnChainDelegation> = {};
+  const bytes = (e: xdr.ScMapEntry): Uint8Array => new Uint8Array(e.val().bytes());
+  for (const e of entries) {
+    switch (e.key().sym().toString()) {
+      case "allowance_commitment":
+        out.allowanceCommitment = pointFromBytes(bytes(e));
+        break;
+      case "a_tilde":
+        out.aTilde = fromBytesBE(bytes(e));
+        break;
+      case "escrowed_dvk": {
+        const b = bytes(e);
+        if (b.length !== 64) throw new Error(`escrowed_dvk: expected 64 bytes, got ${b.length}`);
+        out.escrowedDvk = { rX: fromBytesBE(b.subarray(0, 32)), cipher: fromBytesBE(b.subarray(32, 64)) };
+        break;
+      }
+      case "allowance_salt":
+        out.allowanceSalt = fromBytesBE(bytes(e));
+        break;
+      case "live_until_ledger":
+        out.liveUntilLedger = e.val().u32();
+        break;
+    }
+  }
+  const missing = (
+    ["allowanceCommitment", "aTilde", "escrowedDvk", "allowanceSalt", "liveUntilLedger"] as const
+  ).filter((k) => out[k] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `SpenderDelegation is missing ${missing.join(", ")} — the contract's field names ` +
+        `(${entries.map((e) => e.key().sym().toString()).join(", ")}) do not match this SDK build`,
+    );
+  }
+  return out as OnChainDelegation;
 }

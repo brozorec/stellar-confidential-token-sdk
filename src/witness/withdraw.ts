@@ -20,7 +20,7 @@ import {
 import { fieldIn, pointIn, type NoirInputs } from "./common.js";
 
 export interface WithdrawParams {
-  /** Spender's contract-bound key set. */
+  /** Holder's contract-bound key set. */
   keys: KeyPair;
   /**
    * Current spendable-balance plaintext value `v`. Take `v`/`r` from

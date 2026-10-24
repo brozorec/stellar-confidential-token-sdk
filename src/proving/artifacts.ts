@@ -8,7 +8,7 @@
  * Node (scripts, tests) use {@link loadCircuit} below.
  *
  * `clawback` is shipped for auditor tooling; this SDK has no clawback witness
- * builder yet.
+ * builder yet. Every other circuit has a builder in `witness/`.
  */
 
 import { readFileSync } from "node:fs";
@@ -16,7 +16,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 
-export type CircuitName = "register" | "withdraw" | "transfer" | "clawback";
+export type CircuitName =
+  | "register"
+  | "withdraw"
+  | "transfer"
+  | "set_spender"
+  | "spender_transfer"
+  | "clawback";
 
 const circuitsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "circuits");
 

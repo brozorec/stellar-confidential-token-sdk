@@ -10,19 +10,13 @@
 import { xdr, Address, Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 
 import { deriveKeys } from "../src/crypto/keys.ts";
-import { G, H, IDENTITY, commit, ecdh, scalarMul, pointToBytes } from "../src/crypto/grumpkin.ts";
+import { G, H, IDENTITY, commit, scalarMul, pointToBytes } from "../src/crypto/grumpkin.ts";
 import { randomScalar, toBytes32BE } from "../src/crypto/field.ts";
 import { addressToField } from "../src/crypto/address.ts";
-import {
-  deriveAllowR,
-  deriveSpendR,
-  deriveTransferBlind,
-  dvkFromVkOp,
-  encryptAllowance,
-  encryptAmount,
-  encryptBalance,
-} from "../src/crypto/poseidon2.ts";
+import { recoverEscrowedDvk } from "../src/crypto/delegation.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
+import { buildSetSpenderWitness } from "../src/witness/set-spender.ts";
+import { buildSpenderTransferWitness } from "../src/witness/spender-transfer.ts";
 import { StateEngine, StateDivergedError, StateUnverifiedError } from "../src/state/engine.ts";
 import { MemoryStore } from "../src/state/store.ts";
 
@@ -65,8 +59,6 @@ const ev = (name, topics, fields) => {
     value: data(fields),
   };
 };
-const junk = () => fld(randomScalar());
-const junkPoint = () => pnt(scalarMul(randomScalar(), H));
 
 // --- The scenario, with the contract-side commitments tracked alongside -------
 let cSpend = IDENTITY, cRecv = IDENTITY;
@@ -96,41 +88,57 @@ cRecv = cRecv.add(p.cTransfer);
 events.push(ev("merge", [A], {}));
 cSpend = cSpend.add(cRecv); cRecv = IDENTITY; // spendable now opens (140, r_transfer)
 
+// Delegation events come from the real witness builders: set_spender from my
+// replayed opening (140, r_transfer), spender transfers from what S recovers
+// out of the escrow — the same values the contract would emit.
+const sKeys = deriveKeys(randomScalar(), addrF);
+const audS = scalarMul(9n, H), audR = scalarMul(7n, H);
+const spenderTransferFields = (q) => ({
+  r_e_point: pnt(q.rE), v_tilde: fld(q.vTilde), sigma_a_new: fld(q.sigmaANew),
+  v_tilde_aud_r: fld(q.vAudR), r_tilde_aud_r: fld(q.rAudR), v_tilde_aud_s: fld(q.vAudS),
+  a_tilde_aud_s: fld(q.aAudS), r_tilde_aud_s: fld(q.rAudS),
+});
+const delegateAndSpend = (owner, v, r, escrow, amount, pvkRecipient) => {
+  const sw = buildSetSpenderWitness({ keys: owner, v, r, amount: escrow, spender: S, yOp: sKeys.Y, kAudS: audS });
+  const rec = recoverEscrowedDvk(sKeys.sk, addressToField(S), {
+    escrowedDvk: sw.payload.escrowedDvk, aTilde: sw.payload.aTilde,
+    allowanceSalt: sw.payload.sigmaA, allowanceCommitment: sw.payload.cA,
+  });
+  const stw = buildSpenderTransferWitness({
+    keys: sKeys, allowance: { dvk: rec.dvk, sigmaA: sw.payload.sigmaA, v: rec.opening.v },
+    amount, pvkRecipient, kAudR: audR, kAudS: audS,
+  });
+  return { sw, stw };
+};
+
 // set_spender: escrow 30 to S. Checkpoint: C_spend' = Com(110, r').
-const dvk = dvkFromVkOp(me.vk, addressToField(S));
-const sigma = randomScalar(), sigmaA = randomScalar();
+const preEscrowOk = commit(140n, tw.recipientView.rTransfer).equals(cSpend);
+const mine = delegateAndSpend(me, 140n, tw.recipientView.rTransfer, 30n, 10n, deriveKeys(randomScalar(), addrF).PVK);
+const sp = mine.sw.payload;
 events.push(ev("set_spender", [A, S], {
-  live_until_ledger: xdr.ScVal.scvU32(9999), r_e_point: junkPoint(), sigma: fld(sigma),
-  b_tilde: fld(encryptBalance(110n, me.vk, sigma)), v_tilde_aud_s: junk(), b_tilde_aud_s: junk(),
-  r_tilde_aud_s: junk(), r_a_tilde_aud_s: junk(),
+  live_until_ledger: xdr.ScVal.scvU32(9999), r_e_point: pnt(sp.rE), sigma: fld(sp.sigma),
+  b_tilde: fld(sp.bTilde), v_tilde_aud_s: fld(sp.vAudS), b_tilde_aud_s: fld(sp.bAudS),
+  r_tilde_aud_s: fld(sp.rAudS), r_a_tilde_aud_s: fld(sp.raAudS),
 }));
-cSpend = commit(110n, deriveSpendR(me.vk, sigma));
-let allowance = { v: 30n, r: deriveAllowR(dvk, sigmaA) }; // C_a, held by the delegation
+cSpend = sp.cSpendNew;
+let cA = sp.cA; // held by the delegation
 
 // S spends 10 of my allowance to C: my balances are untouched.
-const sigmaA2 = randomScalar();
-events.push(ev("spender_transfer", [S, A, C], {
-  r_e_point: junkPoint(), v_tilde: junk(), sigma_a_new: fld(sigmaA2), v_tilde_aud_r: junk(),
-  r_tilde_aud_r: junk(), v_tilde_aud_s: junk(), a_tilde_aud_s: junk(), r_tilde_aud_s: junk(),
-}));
-allowance = { v: 20n, r: deriveAllowR(dvk, sigmaA2) };
+events.push(ev("spender_transfer", [S, A, C], spenderTransferFields(mine.stw.payload)));
+cA = mine.stw.payload.cANew;
 
 // Some other owner's spender pays ME 25: credit keyed by σ_a′.
-const rEs = randomScalar(), sigmaIn = randomScalar();
-const sIn = ecdh(rEs, me.PVK);
-events.push(ev("spender_transfer", [S, X, A], {
-  r_e_point: pnt(scalarMul(rEs, H)), v_tilde: fld(encryptAmount(25n, sIn, sigmaIn)),
-  sigma_a_new: fld(sigmaIn), v_tilde_aud_r: junk(), r_tilde_aud_r: junk(),
-  v_tilde_aud_s: junk(), a_tilde_aud_s: junk(), r_tilde_aud_s: junk(),
-}));
-cRecv = cRecv.add(commit(25n, deriveTransferBlind(sIn, sigmaIn)));
+const theirs = delegateAndSpend(deriveKeys(randomScalar(), addrF), 500n, randomScalar(), 60n, 25n, me.PVK);
+events.push(ev("spender_transfer", [S, X, A], spenderTransferFields(theirs.stw.payload)));
+cRecv = cRecv.add(theirs.stw.payload.cTransfer);
 
-// Revoke: C_spend += C_a (the delegation's CURRENT allowance and salt).
+// Revoke: C_spend += C_a, the event carrying the delegation's CURRENT
+// (a_tilde, salt) — the ones S's transfer wrote.
 const revokeEv = ev("revoke_spender", [A, S], {
-  a_tilde: fld(encryptAllowance(allowance.v, dvk, sigmaA2)), allowance_salt: fld(sigmaA2),
+  a_tilde: fld(mine.stw.next.aTilde), allowance_salt: fld(mine.stw.next.sigmaA),
 });
 events.push(revokeEv);
-cSpend = cSpend.add(commit(allowance.v, allowance.r));
+cSpend = cSpend.add(cA);
 
 // Clawback 15 with destination None: the field is OMITTED (soroban-sdk 28).
 events.push(ev("clawback", [A], { amount: i128(15n) }));
@@ -177,6 +185,7 @@ const onchainOf = (spend, recv) => ({
 });
 
 console.log("full replay (all event types):");
+check("scenario premise: my replayed opening before set_spender is (140, r_transfer)", preEscrowOk);
 {
   const engine = engineFor(events, onchainOf(finalSpend, finalRecv));
   let state, err;

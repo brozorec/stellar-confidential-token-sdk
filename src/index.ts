@@ -4,10 +4,12 @@
  * Layers:
  *   - crypto/   Grumpkin + Poseidon2 + key/address derivation (parity-checked
  *               against the circuits)
- *   - witness/  per-circuit witness builders (register, withdraw, transfer)
+ *   - witness/  per-circuit witness builders (register, withdraw, transfer,
+ *               set_spender, spender_transfer, and the disclosure circuits)
  *   - proving/  UltraHonk proving via bb.js (keccak transcript)
  *   - chain/    RPC client, XDR payload envelopes, op submitters, event ingest
- *   - state/    RPC-only balance reconstruction with local persistence
+ *   - state/    balance reconstruction with local persistence; the
+ *               spender-side wallet over on-chain delegation entries
  *   - disclosure/  off-chain selective disclosure (prove + verify)
  *   - auditor/  auditor-side event decryption
  *   - version   the version matrix (protocol release, toolchain, VK set)

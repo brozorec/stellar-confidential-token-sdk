@@ -41,13 +41,16 @@ const present = [
 for (const f of present) ok(f in manifest.sha256, `${f}: present but not recorded in manifest.json`);
 
 // Public-input arity per circuit (withdraw/transfer grew r_tilde_aud_s in v0.8.0).
-const ARITY = { register: 6, withdraw: 16, transfer: 25, clawback: 11 };
+const ARITY = { register: 6, withdraw: 16, transfer: 25, set_spender: 26, spender_transfer: 25, clawback: 11 };
 for (const [name, n] of Object.entries(ARITY)) {
   const c = JSON.parse(readFileSync(join(CIRCUITS, `${name}.json`), "utf8"));
   const pub = c.abi.parameters.filter((p) => p.visibility === "public");
   ok(pub.length === n, `${name}: ${pub.length} public inputs, expected ${n}`);
-  if (name === "withdraw" || name === "transfer") {
+  if (name === "withdraw" || name === "transfer" || name === "spender_transfer") {
     ok(pub.at(-1)?.name === "r_tilde_aud_s", `${name}: last public input is ${pub.at(-1)?.name}, expected r_tilde_aud_s`);
+  }
+  if (name === "set_spender") {
+    ok(pub.at(-1)?.name === "r_a_tilde_aud_s", `${name}: last public input is ${pub.at(-1)?.name}, expected r_a_tilde_aud_s`);
   }
   ok(
     c.noir_version.startsWith(manifest.toolchain.nargo + "+"),

@@ -15,6 +15,9 @@ import { randomScalar } from "../src/crypto/field.ts";
 import { buildRegisterWitness } from "../src/witness/register.ts";
 import { buildWithdrawWitness } from "../src/witness/withdraw.ts";
 import { buildTransferWitness } from "../src/witness/transfer.ts";
+import { buildSetSpenderWitness } from "../src/witness/set-spender.ts";
+import { buildSpenderTransferWitness } from "../src/witness/spender-transfer.ts";
+import { recoverEscrowedDvk } from "../src/crypto/delegation.ts";
 import { CircuitProver } from "../src/proving/prover.ts";
 import { loadCircuit } from "../src/proving/artifacts.ts";
 import { readFileSync } from "node:fs";
@@ -23,7 +26,7 @@ import { dirname, join } from "node:path";
 
 const VKS = join(dirname(fileURLToPath(import.meta.url)), "..", "circuits", "vks");
 const PROOF_BYTES = 14592;
-const PUBLIC_INPUTS = { register: 6, withdraw: 16, transfer: 25 };
+const PUBLIC_INPUTS = { register: 6, withdraw: 16, transfer: 25, set_spender: 26, spender_transfer: 25 };
 
 const TOKEN = "CCREDIB3DG3IBVUKBL7QMEK4MTPSTODR7MQ34QY4SQ5LZ5L4WFWNVNXG";
 const addrF = addressToField(TOKEN);
@@ -90,6 +93,41 @@ await proveAndVerify("transfer", () => {
     r: 0n,
     amount: 250n,
     pvkB: recipient.PVK,
+    kAudR: auditorKey(),
+    kAudS: auditorKey(),
+  }).inputs;
+});
+
+// The spender_transfer witness is built from the set_spender one the way a
+// spender would: dvk recovered from the escrow, never from the owner's vk.
+const SPENDER = "GBPRIMWXMQQZGAP5YJLHTFSOLAOEYKUAJYH4A7ORYAAVIVBHTRWYZWFH";
+const owner = deriveKeys(randomScalar(), addrF);
+const spender = deriveKeys(randomScalar(), addrF);
+const sw = buildSetSpenderWitness({
+  keys: owner,
+  v: 1000n,
+  r: randomScalar(),
+  amount: 300n,
+  spender: SPENDER,
+  yOp: spender.Y,
+  kAudS: auditorKey(),
+});
+
+await proveAndVerify("set_spender", () => sw.inputs);
+
+await proveAndVerify("spender_transfer", () => {
+  const rec = recoverEscrowedDvk(spender.sk, addressToField(SPENDER), {
+    escrowedDvk: sw.payload.escrowedDvk,
+    aTilde: sw.payload.aTilde,
+    allowanceSalt: sw.payload.sigmaA,
+    allowanceCommitment: sw.payload.cA,
+  });
+  if (!rec) throw new Error("spender could not recover dvk");
+  return buildSpenderTransferWitness({
+    keys: spender,
+    allowance: { dvk: rec.dvk, sigmaA: sw.payload.sigmaA, v: rec.opening.v },
+    amount: 120n,
+    pvkRecipient: deriveKeys(randomScalar(), addrF).PVK,
     kAudR: auditorKey(),
     kAudS: auditorKey(),
   }).inputs;

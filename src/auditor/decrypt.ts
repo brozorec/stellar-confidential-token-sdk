@@ -2,8 +2,9 @@
  * Auditor-side event decryption.
  *
  * The auditor holds the Grumpkin secret `k` behind the registry key
- * `K_aud = k·H` and decrypts the auditor ciphertexts every withdraw/transfer
- * event carries — using nothing but the public event and `k`. No viewing
+ * `K_aud = k·H` and decrypts the auditor ciphertexts every withdraw, transfer,
+ * set_spender and spender_transfer event carries — using nothing but the
+ * public event and `k`. No viewing
  * keys, no holder cooperation, no extra on-chain data:
  *
  *   s     = ecdh(k, R_e)             (ECDH against the event's ephemeral point;
@@ -23,13 +24,30 @@
  * Withdraw events carry only the sender channel's checkpoint lanes: lane 1
  * (post-op balance) and lane 2 (post-op blinding). Lane 0, the amount slot,
  * goes unused because the withdrawn amount is public.
+ *
+ * Delegations (docs/protocol/auditing.md#spender-allowance-auditing): the
+ * sender channel of `set_spender` and `spender_transfer` belongs to the
+ * funds' OWNER, keyed by the owner's `auditor_id`. `set_spender` carries the
+ * escrowed amount, the owner's post-escrow checkpoint (lanes 0–2), and the
+ * allowance blinding `r_a` under its own tag 17 over `op_i`. A
+ * `spender_transfer` keys both channels by `σ_a'` and its owner channel
+ * carries the post-transfer allowance and its blinding `r_a'` in lanes 1–2.
+ * Each event alone opens the `C_a` it wrote. `revoke_spender` opens no
+ * channel: folding it needs the opening from the delegation's last
+ * state-changing event, which a single-event decryptor does not keep.
  */
 
 import { H, ecdh, scalarMul, type Point } from "../crypto/grumpkin.js";
 import { frMod } from "../crypto/field.js";
 import { DOMAIN } from "../crypto/constants.js";
-import { spongeSqueeze2, spongeSqueeze3 } from "../crypto/poseidon2.js";
-import type { TransferEvent, WithdrawEvent } from "../chain/events.js";
+import { addressToField } from "../crypto/address.js";
+import { poseidonWithDomain, spongeSqueeze2, spongeSqueeze3 } from "../crypto/poseidon2.js";
+import type {
+  SetSpenderEvent,
+  SpenderTransferEvent,
+  TransferEvent,
+  WithdrawEvent,
+} from "../chain/events.js";
 
 /** What the sender's auditor learns from one transfer (T_a5–T_a9). */
 export interface AuditedSenderChannel {
@@ -130,6 +148,86 @@ export function auditWithdraw(
   const sX = ecdh(k, ev.rE);
   const [, mB, mR] = spongeSqueeze3(DOMAIN.AUDITOR_SENDER, sX, ev.sigma);
   return { senderBalance: frMod(ev.bAudS - mB), senderBlinding: frMod(ev.rAudS - mR) };
+}
+
+/** What the owner's auditor learns from one `set_spender` (S_a1–S_a6, S14). */
+export interface AuditedSetSpender {
+  /** The escrowed allowance `v_a` (lane 0). */
+  amount: bigint;
+  /** Owner's post-escrow spendable balance `v − v_a` (lane 1). */
+  senderBalance: bigint;
+  /** Owner's post-escrow spendable blinding `r'` (lane 2); opens `C_spend'` with `senderBalance`. */
+  senderBlinding: bigint;
+  /** Allowance blinding `r_a` (tag 17); opens the new `C_a` with `amount`. */
+  allowanceBlinding: bigint;
+}
+
+/**
+ * Decrypt a `set_spender` under the owner's auditor secret `k`: the three
+ * lanes of a transfer's sender channel, plus `r_a` under tag 17. `op_i` for
+ * the `r_a` escrow comes from the event's `spender` topic.
+ */
+export function auditSetSpender(
+  k: bigint,
+  ev: Pick<SetSpenderEvent, "spender" | "rE" | "sigma" | "vAudS" | "bAudS" | "rAudS" | "raAudS">,
+): AuditedSetSpender {
+  const mRa = poseidonWithDomain(DOMAIN.ESCROWED_ALLOWANCE_BLINDING_AUDITOR, [ecdh(k, ev.rE), addressToField(ev.spender)]);
+  return { ...auditTransferSenderChannel(k, ev), allowanceBlinding: frMod(ev.raAudS - mRa) };
+}
+
+/** What the owner's auditor learns from one `spender_transfer` (O_a5–O_a9). */
+export interface AuditedOwnerChannel {
+  /** Transfer amount `v_transfer` (lane 0). */
+  amount: bigint;
+  /** Post-transfer allowance `v_a − v_transfer` (lane 1). */
+  allowance: bigint;
+  /** Post-transfer allowance blinding `r_a'` (lane 2); opens `C_a'` with `allowance`. */
+  allowanceBlinding: bigint;
+}
+
+/**
+ * Decrypt a spender transfer's owner-auditor channel: the three lanes of a
+ * transfer's sender channel, keyed by `σ_a'`, with the allowance in place of
+ * the balance.
+ */
+export function auditSpenderTransferOwnerChannel(
+  k: bigint,
+  ev: Pick<SpenderTransferEvent, "rE" | "sigmaANew" | "vAudS" | "aAudS" | "rAudS">,
+): AuditedOwnerChannel {
+  const s = auditTransferSenderChannel(k, {
+    rE: ev.rE, sigma: ev.sigmaANew, vAudS: ev.vAudS, bAudS: ev.aAudS, rAudS: ev.rAudS,
+  });
+  return { amount: s.amount, allowance: s.senderBalance, allowanceBlinding: s.senderBlinding };
+}
+
+/**
+ * Decrypt a spender transfer's recipient-auditor channel: the same two lanes
+ * as a transfer's, keyed by `σ_a'` instead of `σ`.
+ */
+export function auditSpenderTransferRecipientChannel(
+  k: bigint,
+  ev: Pick<SpenderTransferEvent, "rE" | "sigmaANew" | "vAudR" | "rAudR">,
+): AuditedRecipientChannel {
+  return auditTransferRecipientChannel(k, { rE: ev.rE, sigma: ev.sigmaANew, vAudR: ev.vAudR, rAudR: ev.rAudR });
+}
+
+/** Both channels of one spender transfer, decrypted under a single auditor key. */
+export interface AuditedSpenderTransfer extends AuditedOwnerChannel {
+  /** Per-transfer Pedersen randomness (recipient channel). */
+  rTransfer: bigint;
+  /**
+   * The amount decrypts independently on each channel and MUST agree under
+   * the correct key; `false` means `k` is not the auditor key of both the
+   * owner (`from`) and the recipient (`to`).
+   */
+  channelsAgree: boolean;
+}
+
+/** {@link auditTransfer} for a `spender_transfer`: one key for owner and recipient. */
+export function auditSpenderTransfer(k: bigint, ev: SpenderTransferEvent): AuditedSpenderTransfer {
+  const o = auditSpenderTransferOwnerChannel(k, ev);
+  const r = auditSpenderTransferRecipientChannel(k, ev);
+  return { ...o, rTransfer: r.rTransfer, channelsAgree: o.amount === r.amount };
 }
 
 /** The registry public key `K_aud = k·H` for an auditor secret `k`. */

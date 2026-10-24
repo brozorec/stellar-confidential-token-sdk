@@ -47,11 +47,11 @@ import { DOMAIN } from "../crypto/constants.js";
 import { addressToField } from "../crypto/address.js";
 import {
   decryptWithDomain,
-  deriveAllowR,
   deriveSpendR,
   deriveTransferBlind,
   dvkFromVkOp,
 } from "../crypto/poseidon2.js";
+import { openAllowanceEntry, openAllowanceUnder } from "../crypto/delegation.js";
 import type { KeyPair } from "../crypto/keys.js";
 import type { ChainClient } from "../chain/client.js";
 import { type ConfidentialEvent } from "../chain/events.js";
@@ -59,6 +59,7 @@ import { hybridFetchEvents } from "../chain/event-source.js";
 import type { IndexerClient } from "../chain/indexer.js";
 import type { StateStore } from "./store.js";
 import { freshState, type AccountState, type Opening } from "./types.js";
+import { DelegationUnreadableError, toAllowance, type Allowance } from "./spender.js";
 
 export interface StateEngineConfig {
   client: ChainClient;
@@ -79,6 +80,11 @@ export interface StateEngineConfig {
    * older than retention are unavailable.
    */
   indexer?: IndexerClient;
+  /**
+   * Ledgers before expiry at which {@link StateEngine.delegation} reports
+   * `"expiring"` (default `DEFAULT_EXPIRY_WARNING_LEDGERS`).
+   */
+  expiryWarningLedgers?: number;
 }
 
 /**
@@ -188,9 +194,32 @@ export class StateEngine {
    * `dvk = Poseidon2(DELEGATION_VIEWING_KEY, vk, addr_f(spender))`.
    */
   openAllowance(spender: string, aTilde: bigint, allowanceSalt: bigint): Opening {
-    const dvk = dvkFromVkOp(this.cfg.keys.vk, addressToField(spender));
-    const v = decryptWithDomain(aTilde, DOMAIN.ENCRYPTED_ALLOWANCE, dvk, allowanceSalt);
-    return { v, r: deriveAllowR(dvk, allowanceSalt) };
+    return openAllowanceUnder(this.delegationKey(spender), aTilde, allowanceSalt);
+  }
+
+  /** The owner's `dvk` for a delegation to `spender`. */
+  private delegationKey(spender: string): bigint {
+    return dvkFromVkOp(this.cfg.keys.vk, addressToField(spender));
+  }
+
+  /**
+   * The allowance currently escrowed with `spender`, read from the on-chain
+   * delegation entry and opened under the owner's own `dvk`, or `null` if
+   * none exists. Expired entries are returned: their value comes back on
+   * `revoke_spender`. A spender_transfer moves it without touching the owner's
+   * accumulators, so this is the only owner-side view of it.
+   *
+   * @throws {DelegationUnreadableError} if the entry does not re-commit
+   *   under the owner's `dvk`: these keys did not create it.
+   */
+  async delegation(spender: string): Promise<Allowance | null> {
+    const { address, client, expiryWarningLedgers } = this.cfg;
+    const { delegation, latestLedger } = await client.spenderDelegationAt(address, spender);
+    if (!delegation) return null;
+    const dvk = this.delegationKey(spender);
+    const opening = openAllowanceEntry(dvk, delegation);
+    if (!opening) throw new DelegationUnreadableError(address, spender);
+    return toAllowance(address, spender, delegation, dvk, opening, latestLedger, expiryWarningLedgers);
   }
 
   /** Apply one event in-place to `state`. */
@@ -327,9 +356,9 @@ export class StateEngine {
   /**
    * The spendable opening to build a proof from, verified against the chain
    * first (docs/sdk/wallet.md#consistency-checking: "before constructing any
-   * proof"). Only the spendable accumulator gates proving — the withdraw and
-   * transfer circuits open `C_spend` alone; a receiving divergence is still
-   * reported on the error if both diverged.
+   * proof"). Only the spendable accumulator gates proving — the withdraw,
+   * transfer and set_spender circuits open `C_spend` alone; a receiving
+   * divergence is still reported on the error if both diverged.
    *
    * @throws {StateDivergedError} if the spendable opening does not match
    *   on-chain `C_spend` read at the ledger the state is synced to.

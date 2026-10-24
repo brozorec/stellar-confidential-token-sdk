@@ -8,22 +8,27 @@
  * resolved independently from the chain, and `(P_R, nu)` come from the
  * verifier's OWN request record, never from the prover. Which account each
  * PVK is read from is dictated by the variant and the event payload
- * (step 2): `E.to` for D-recipient; `E.from` (originator) plus `E.to`
- * (transfer recipient) for D-sender. A verifier that took any of these from
- * the bundle would prove nothing.
+ * (step 2): `E.to` for D-recipient; the originator plus `E.to` (transfer
+ * recipient) for D-sender, the originator being `E.from` on a Transfer and
+ * `E.spender` on a SpenderTransfer. A verifier that took any of these from
+ * the bundle would prove nothing. The event nonce `σ_E` (`σ`, or `σ_a'` on a
+ * SpenderTransfer) is read from the resolved event too.
  */
 
 import { fromHex, toHex32, hexToBytes } from "../crypto/field.js";
 import { addressToField } from "../crypto/address.js";
 import { pointCoords } from "../crypto/grumpkin.js";
 import type { ChainClient } from "../chain/client.js";
-import { type TransferEvent } from "../chain/events.js";
 import { hybridResolveEventRef } from "../chain/event-source.js";
 import type { IndexerClient } from "../chain/indexer.js";
 import type { CircuitProver } from "../proving/prover.js";
 import {
   DISCLOSE_SENDER_CIRCUIT_ID,
   DISCLOSURE_CIRCUIT_IDS,
+  disclosureNonce,
+  disclosureOriginator,
+  isDisclosableEvent,
+  type DisclosableEvent,
   type DisclosureBundle,
   type DisclosureRequest,
   type RecipientKeys,
@@ -52,10 +57,13 @@ export interface VerifiedDisclosure {
   /** The disclosed amount — trustworthy as the chain itself. */
   amount: bigint;
   /** The resolved on-chain event the proof is pinned to. */
-  event: TransferEvent;
+  event: DisclosableEvent;
   /** What was proven: the disclosing party received or sent the payment. */
   role: "recipient" | "sender";
-  /** The account the proof binds to (`E.to` for recipient, `E.from` for sender). */
+  /**
+   * The account the proof binds to: `E.to` for recipient; for sender `E.from`
+   * on a Transfer, `E.spender` on a SpenderTransfer.
+   */
   disclosingAccount: string;
   /** Human-readable trace of each verifier step, for display. */
   steps: string[];
@@ -119,9 +127,9 @@ export async function verifyDisclosure(params: {
   );
 
   // Step 1 — resolve ref_E to exactly one token-contract event. The decoder
-  // requires every Transfer field the contract emits (from, to, R_e, sigma,
-  // v_tilde, b_tilde, the recipient- and sender-auditor channels including
-  // r_tilde_aud_s), so a short or renamed payload never reaches step 4.
+  // requires every field the contract emits for the event (for a Transfer:
+  // from, to, R_e, sigma, v_tilde, b_tilde and both auditor channels), so a
+  // short or renamed payload never reaches step 4.
   const event = await hybridResolveEventRef(client, indexer, bundle.refE);
   if (!event) {
     throw new DisclosureVerifyError(
@@ -129,18 +137,21 @@ export async function verifyDisclosure(params: {
       `ref_E does not resolve to a token-contract event (ledger ${bundle.refE.ledger}, id ${bundle.refE.id}) — wrong reference${indexer ? "" : ", or outside the RPC's ~7-day retention window"}`,
     );
   }
-  if (event.type !== "transfer") {
+  if (!isDisclosableEvent(event)) {
     throw new DisclosureVerifyError(
       "resolve-event",
-      `disclosures cover Transfer events; ref_E resolved to "${event.type}"`,
+      `disclosures cover Transfer and SpenderTransfer events; ref_E resolved to "${event.type}"`,
     );
   }
+  const via = event.type === "spender_transfer" ? ` via spender ${event.spender.slice(0, 6)}…` : "";
   steps.push(
-    `Resolved ref_E on-chain: transfer ${event.from.slice(0, 6)}… → ${event.to.slice(0, 6)}… in tx ${event.txHash.slice(0, 10)}… (ledger ${event.ledger})`,
+    `Resolved ref_E on-chain: ${event.type} ${event.from.slice(0, 6)}… → ${event.to.slice(0, 6)}…${via} in tx ${event.txHash.slice(0, 10)}… (ledger ${event.ledger})`,
   );
 
   // Step 2 — account lookups dictated by the variant + the EVENT payload.
-  const disclosingAccount = isSender ? event.from : event.to;
+  const { field: disclosingField, account: disclosingAccount } = isSender
+    ? disclosureOriginator(event)
+    : { field: "to", account: event.to };
   const accountA = await client.confidentialBalance(disclosingAccount);
   if (!accountA) {
     throw new DisclosureVerifyError(
@@ -149,7 +160,7 @@ export async function verifyDisclosure(params: {
     );
   }
   steps.push(
-    `Read PVK_A from the on-chain account at the event's "${isSender ? "from" : "to"}" address (${disclosingAccount.slice(0, 6)}…)`,
+    `Read PVK_A from the on-chain account at the event's "${disclosingField}" address (${disclosingAccount.slice(0, 6)}…)`,
   );
 
   let pvkB: { x: bigint; y: bigint } | null = null;
@@ -178,7 +189,7 @@ export async function verifyDisclosure(params: {
     toHex32(pvkA.y),
     toHex32(rE.x),
     toHex32(rE.y),
-    toHex32(event.sigma),
+    toHex32(disclosureNonce(event)),
     toHex32(event.vTilde),
     ...(pvkB ? [toHex32(pvkB.x), toHex32(pvkB.y)] : []),
     request.pR.x,

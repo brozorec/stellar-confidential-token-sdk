@@ -6,7 +6,41 @@
  * touch the chain.
  */
 
-import type { EventRef } from "../chain/events.js";
+import type {
+  ConfidentialEvent,
+  EventRef,
+  SpenderTransferEvent,
+  TransferEvent,
+} from "../chain/events.js";
+
+/**
+ * The event families D-recipient and D-sender cover. One circuit serves both:
+ * only the event nonce `σ_E` and the originating account differ
+ * (selective-disclosure/README.md).
+ */
+export type DisclosableEvent = TransferEvent | SpenderTransferEvent;
+
+/** Whether a decoded event is one a disclosure circuit covers. */
+export function isDisclosableEvent(ev: ConfidentialEvent): ev is DisclosableEvent {
+  return ev.type === "transfer" || ev.type === "spender_transfer";
+}
+
+/** `σ_E`: `σ` for a Transfer, `σ_a'` for a SpenderTransfer. */
+export function disclosureNonce(ev: DisclosableEvent): bigint {
+  return ev.type === "transfer" ? ev.sigma : ev.sigmaANew;
+}
+
+/**
+ * The account whose ephemeral scalar keyed the event, i.e. who can D-sender
+ * it, and the event field it is read from: `from` for a Transfer, the
+ * `spender` (NOT the owner) for a SpenderTransfer
+ * (d-sender.md#coverage-asymmetry-owner-cannot-d-sender-a-spendertransfer).
+ */
+export function disclosureOriginator(ev: DisclosableEvent): { field: "from" | "spender"; account: string } {
+  return ev.type === "transfer"
+    ? { field: "from", account: ev.from }
+    : { field: "spender", account: ev.spender };
+}
 
 /** D-recipient: "this on-chain payment paid me this amount". */
 export const DISCLOSE_RECIPIENT_CIRCUIT_ID = "disclose_recipient";

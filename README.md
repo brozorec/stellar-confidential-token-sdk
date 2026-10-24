@@ -15,9 +15,9 @@ exactly, validated by executing the real circuits in the test suite.
 - **crypto** — Grumpkin (`@noble/curves`) and Poseidon2
   (`@zkpassport/poseidon2` raw permutation), with generators, domain tags, and
   derivations matching the Noir circuit library exactly.
-- **witness** — per-circuit input builders (register / withdraw / transfer,
-  plus the two disclosure circuits), mirroring each circuit's public-input
-  order.
+- **witness** — per-circuit input builders (register / withdraw / transfer /
+  set_spender / spender_transfer, plus the two disclosure circuits), mirroring
+  each circuit's public-input order.
 - **proving** — UltraHonk via `bb.js` with a **keccak transcript** (required:
   the on-chain verifier uses keccak256 Fiat–Shamir); non-ZK for the on-chain
   circuits, ZK for the off-chain disclosure circuits.
@@ -25,8 +25,10 @@ exactly, validated by executing the real circuits in the test suite.
   submitters, and event ingestion, with an optional indexer as a second event
   source.
 - **state** — balance reconstruction from chain events with local persistence
-  and an on-chain consistency check.
-- **auditor** — decrypts the dual auditor ciphertexts emitted by transfers.
+  and an on-chain consistency check; the spender-side wallet, which reads a
+  delegation's allowance from its on-chain entry.
+- **auditor** — decrypts the auditor ciphertexts emitted by withdrawals,
+  transfers, `set_spender` and spender transfers.
 - **disclosure** — the off-chain selective-disclosure protocol: witness
   building and proving on the holder side; the full receiver protocol (event
   resolution via RPC, on-chain key lookup, VK pinning, decryption) on the
@@ -40,10 +42,18 @@ partial coverage is conformant only if it is stated.
 
 **Implemented**
 
-- **Holder role, for the Register, Withdraw and Transfer circuits**:
-  witness assembly, proving, and submission. The primitive fixtures and
-  circuit-execution parity (with tamper rejection) are tested against the real
-  compiled circuits.
+- **Holder role, for the Register, Withdraw, Transfer and SetSpender
+  circuits**: witness assembly, proving, and submission, plus the proofless
+  `revoke_spender`. The primitive fixtures and circuit-execution parity (with
+  tamper rejection) are tested against the real compiled circuits.
+- **Spender role, for the SpenderTransfer circuit**: witness assembly,
+  proving, and submission, and the spender-side wallet (`SpenderWallet`). It
+  recovers `dvk` from the delegation entry's escrow, opens the allowance, and
+  checks the opening against the on-chain `C_a` on every read. It reports
+  each delegation's expiry ledger and an `expiring` / `expired` status. An
+  expired, unrevoked delegation is still reported with its escrowed value,
+  but `allowanceForProof()` will not prove against it. The owner sees the
+  same entry through `StateEngine.delegation()`.
 - **Holder wallet state**: replay of every event that changes a balance,
   including those a holder cannot prove (merges, `revoke_spender`,
   `set_spender`, `spender_transfer` credits, `clawback`). Every sync ends
@@ -51,23 +61,25 @@ partial coverage is conformant only if it is stated.
   `StateEngine.spendableForProof()`: the witness builders take a raw `(v, r)`
   and cannot check it, so an integrator must take the spendable opening from
   `spendableForProof()`.
-- **Selective disclosure**: D-recipient and D-sender, on `Transfer` events
-  only. The circuits are built here from upstream's specification.
+- **Selective disclosure**: D-recipient and D-sender, on `Transfer` and
+  `SpenderTransfer` events. Only the spender can make a D-sender disclosure of
+  a SpenderTransfer; the owner cannot. The circuits are built here from
+  upstream's specification.
 
 **Not implemented.** The SDK makes no conformance claim for:
 
-- SetSpender and SpenderTransfer proving, and the spender-side wallet (the
-  spender role).
 - Clawback proving and the stateful auditor of `docs/sdk/auditor-client.md`
-  (the auditor role). `auditor/` decrypts single events only.
-- D-auditor, D-balance and aggregate disclosures, and any disclosure of a
-  `SpenderTransfer` event.
+  (the auditor role). `auditor/` decrypts single events only. That covers every
+  channel of withdraw, transfer, `set_spender` and spender-transfer events,
+  but it keeps no openings across events, so it cannot fold a
+  `revoke_spender`.
+- D-auditor, D-balance and aggregate disclosures.
 
-**Known gaps in the holder role.** Each of these MUST-level requirements is
-still open:
+**Known gaps in the holder and spender roles.** Each of these MUST-level
+requirements is still open:
 
-- No on-chain verification-key identity check before submitting a proof
-  (`docs/sdk/proving.md#verification-key-identity`).
+- No on-chain verification-key identity check before submitting a proof, for
+  any circuit (`docs/sdk/proving.md#verification-key-identity`).
 - The indexer's completeness signal is not propagated, and the indexer's
   ingested-through point is not checked against the seam
   (`IndexerClient.health()` exists, but nothing calls it).
@@ -122,7 +134,7 @@ indexer and skips itself unless `CTD_INDEXER_URL` and `CTD_TOKEN` are set.
 
 | Path | Contents |
 |:---|:---|
-| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer / clawback circuits, from `stellar-confidential`. |
+| `circuits/<name>.json` | Compiled ACIR for the register / withdraw / transfer / set_spender / spender_transfer / clawback circuits, from `stellar-confidential`. |
 | `circuits/vks/*.vk.bin` | Verification keys, as registered with the on-chain verifier contract. |
 | `circuits/disclosure/` | Compiled disclosure circuits and their pinned verification keys. |
 | `circuits/disclosure/noir/` | Noir source of the disclosure circuits. Upstream specifies them but ships no implementation, so they are built here (`pnpm exec tsx scripts/build-disclosure.mjs`) against upstream's circuit library. |
@@ -197,9 +209,28 @@ detected, never silently spent. A mismatching read at another ledger is
 re-synced or re-read first; if the two never line up, the sync throws
 `StateUnverifiedError` (retry — it is not a divergence). `StateEngine.spendableForProof()` repeats the
 check against the current chain and returns the verified spendable opening.
-Build every withdraw and transfer witness from it, not from `current()` or a
-cached copy: the witness builders take whatever `(v, r)` they are given, so
-this call is the only check before a proof.
+Build every withdraw, transfer and set_spender witness from it, not from
+`current()` or a cached copy: the witness builders take whatever `(v, r)` they
+are given, so this call is the only check before a proof.
+
+### Spender side
+
+A spender keeps no event-derived state. Its allowance is the owner's on-chain
+`SpenderDelegation` entry: `SpenderWallet.allowance(owner)` recovers `dvk`
+from the entry's `escrowed_dvk` with the spender's own `sk`, opens
+`(v_a, r_a)` from `a_tilde` and the stored salt, and checks the opening against
+`C_a` before returning it. `escrowed_dvk` stores only `R.x`, so the wallet
+tries both `±R` and keeps the one whose opening matches. Build every
+spender-transfer witness from `allowanceForProof(owner)`, which also refuses
+an expired or absent delegation. An absent entry means it was never set, or
+the owner revoked it. `allowances({ fromLedger })` finds delegating owners
+from `set_spender` events, so with the RPC alone it sees only the retention
+window; pass an indexer to see older ones.
+
+Every spender transfer keys its pads and its ephemeral scalar by a fresh
+replacement salt `σ_a'`, which the builder samples per attempt. The circuit
+rejects only `σ_a' = σ_a`, so a caller that passes `sigmaANew` explicitly
+takes on never repeating it over the delegation's life.
 
 ## License
 
